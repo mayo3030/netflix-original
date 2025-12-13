@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+.env
+
+# Sensitive files - DO NOT COMMIT
+netflix_cookies.json
+netflix_cookies.txt
+netflix_local_storage.json
+netflix_session_storage.json
+*.wvd
+
+# Browser data
+browser_profile/
+
+# Output
+output/
+*.mp4
+*.webm
+*.mkv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

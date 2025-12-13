@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Title Details - Netflix Scraper</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #141414;
+        }
+        .netflix-red { color: #E50914; }
+        .card-bg { background-color: #1f1f1f; }
+    </style>
+</head>
+<body class="text-white min-h-screen p-8">
+    <div class="max-w-4xl mx-auto">
+        <a href="/" class="text-gray-400 hover:text-white mb-6 inline-block">← Back to Dashboard</a>
+        <div id="content" class="card-bg rounded-xl p-8">
+            <p class="text-gray-400">Loading...</p>
+        </div>
+    </div>
+    
+    <script>
+        const titleId = '{{ title_id }}';
+        
+        fetch(`/api/titles/${titleId}`)
+            .then(res => res.json())
+            .then(title => {
+                document.getElementById('content').innerHTML = `
+                    <h1 class="text-3xl font-bold mb-4">${title.title}</h1>
+                    <pre class="bg-gray-900 p-4 rounded-lg overflow-x-auto text-sm">${JSON.stringify(title, null, 2)}</pre>
+                `;
+            })
+            .catch(err => {
+                document.getElementById('content').innerHTML = `<p class="text-red-400">Error: ${err.message}</p>`;
+            });
+    </script>
+</body>
+</html>
+
+
