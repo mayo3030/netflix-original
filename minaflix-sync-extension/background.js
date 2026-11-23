@@ -789,7 +789,7 @@ async function syncCatalog(message) {
       try { return new URL(url).pathname.startsWith('/browse'); } catch { return false; }
     });
     let job = await readCatalogJob();
-    if (!job?.rows?.length) {
+    if (!job?.rows?.length || job.rowPass !== 2) {
       send({ type: 'progress', text: 'Reading home rows…' });
       let rows = [];
       let genres = [];
@@ -818,8 +818,16 @@ async function syncCatalog(message) {
           if (titles.length) rows.push({ name: genre.name, titles });
         }
       }
-      const pending = [...new Set(rows.flatMap((row) => row.titles.map((item) => item.netflixId)))];
-      job = prepareJob({ rows, details: {}, pending, detailVersion: 3 }, message);
+      const previous = job || {};
+      const pending = [...new Set(rows.flatMap((row) => row.titles.map((item) => item.netflixId)))].filter((id) => !detailComplete(previous.details?.[id]));
+      job = prepareJob({
+        ...previous,
+        rows,
+        pending,
+        forModal: [],
+        rowPass: 2,
+        detailVersion: previous.detailVersion || 3,
+      }, message);
       await writeCatalogJob(job);
     } else {
       job = prepareJob(job, message);
