@@ -460,7 +460,7 @@ function catalogTitle(item, meta, trailer) {
     showTitle: null,
     netflixId: item.netflixId,
     watchedAt: null,
-    synopsis: meta?.synopsis || null,
+    synopsis: realSynopsis(meta?.synopsis) || null,
     year: meta?.year || null,
     maturity: meta?.maturity || null,
     runtimeMinutes: meta?.runtimeMinutes ?? null,
@@ -614,8 +614,17 @@ function prepareJob(job, message) {
   return job;
 }
 
+function isAdvisorySynopsis(value) {
+  return /parents strongly cautioned|may not be suitable for ages|suitable for|recommended for ages|viewer discretion|mature content/i.test(String(value || ''));
+}
+
+function realSynopsis(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text && !isAdvisorySynopsis(text) ? text : '';
+}
+
 function detailComplete(meta) {
-  if (!meta?.synopsis) return false;
+  if (!realSynopsis(meta?.synopsis)) return false;
   return Boolean(meta.cast?.length || meta.genres?.length || meta.directors?.length || meta.creators?.length);
 }
 
@@ -625,7 +634,7 @@ function mergeMeta(current, next) {
   const list = (left, right) => (left?.length ? left : (right || []));
   return {
     title: current.title || next.title || '',
-    synopsis: current.synopsis || next.synopsis || '',
+    synopsis: realSynopsis(next.synopsis) && !realSynopsis(current.synopsis) ? realSynopsis(next.synopsis) : (realSynopsis(current.synopsis) || realSynopsis(next.synopsis) || ''),
     year: current.year || next.year || '',
     maturity: current.maturity || next.maturity || '',
     runtimeMinutes: current.runtimeMinutes ?? next.runtimeMinutes ?? null,
@@ -808,10 +817,19 @@ function summaryFor(job, rows) {
   const count = rows.reduce((sum, row) => sum + row.titles.length, 0);
   const images = rows.reduce((sum, row) => sum + row.titles.filter((item) => item.image).length, 0);
   const detailed = Object.keys(job.details || {}).length;
-  const skipped = (job.skipped || []).length;
+  const seen = new Set();
+  let withoutDetails = 0;
+  for (const row of job.rows || []) {
+    for (const item of row.titles || []) {
+      if (!item?.netflixId || seen.has(item.netflixId)) continue;
+      seen.add(item.netflixId);
+      const meta = job.details?.[item.netflixId];
+      if (!meta || !realSynopsis(meta.synopsis)) withoutDetails += 1;
+    }
+  }
   const trailerCount = Object.values(job.trailers || {}).filter((item) => item?.trailerYoutubeId).length;
   const trailerNote = job.lookupTrailers || trailerCount ? ` Trailers ${trailerCount}.` : '';
-  return `Exported ${count} catalog titles in ${rows.length} rows. Images ${images}. Details ${detailed} (${pathSummary(job)}). Skipped ${skipped}.${trailerNote}`;
+  return `Exported ${count} catalog titles in ${rows.length} rows. Images ${images}. Details ${detailed} (${pathSummary(job)}). Without details ${withoutDetails}.${trailerNote}`;
 }
 
 async function exportJob(job, keepJob) {

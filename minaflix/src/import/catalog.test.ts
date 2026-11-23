@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { catalogRows, heroKickerKey, mergeStoredCatalog, parseCatalogFile, titleFromCatalog } from './catalog';
+import { catalogRows, heroKickerKey, mergeCatalogTitle, mergeStoredCatalog, parseCatalogFile, titleFromCatalog } from './catalog';
 
 describe('parseCatalogFile', () => {
   it('reads a catalog export into renderable titles', () => {
@@ -153,5 +153,28 @@ describe('parseCatalogFile', () => {
     expect(title?.maturity).toBe('TV-14');
     expect(title?.trailerYoutubeId).toBe('abcdefghijk');
     vi.unstubAllGlobals();
+  });
+
+  it('drops a maturity advisory used as the synopsis', () => {
+    const catalog = parseCatalogFile(JSON.stringify({
+      kind: 'catalog',
+      rows: [{
+        name: 'Drama',
+        titles: [{
+          title: '100 Days of Deception',
+          netflixId: '82682433',
+          synopsis: 'Parents strongly cautioned. May not be suitable for ages under 14.',
+          cast: ['Someone'],
+        }],
+      }],
+    }));
+    const stored = catalog.rows[0]?.titles[0];
+    expect(stored?.synopsis).toBeNull();
+    expect(titleFromCatalog(stored!).overview).toBe('');
+    const merged = mergeCatalogTitle(stored!, {
+      ...stored!,
+      synopsis: 'A con artist spends one hundred days inside a perfect marriage.',
+    });
+    expect(merged.synopsis).toContain('con artist');
   });
 });

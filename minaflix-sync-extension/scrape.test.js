@@ -570,6 +570,21 @@ describe('live title details', () => {
     expect(api.modalMatches(dom.window.document, '81486332', 'Heartland')).toBe(true);
     expect(api.modalMatches(dom.window.document, '70281312', 'The Blacklist')).toBe(false);
     expect(api.openTitleModal('81486332')).toBe('click');
+    const advisory = page(`
+      <div class="previewModal" data-uia="previewModal--container" role="dialog">
+        <img class="previewModal--player-titleTreatment-logo" alt="100 Days of Deception">
+        <div class="maturity-rating" data-uia="maturity-rating">
+          <p>Parents strongly cautioned. May not be suitable for ages under 14.</p>
+        </div>
+        <p class="preview-modal-synopsis" data-uia="preview-modal-synopsis">Parents strongly cautioned. May not be suitable for ages under 14.</p>
+        <p>A con artist spends one hundred days inside a perfect marriage.</p>
+        <a href="/browse?jbv=82682433">100 Days of Deception</a>
+      </div>
+    `, 'https://www.netflix.com/browse?jbv=82682433');
+    const cleaned = advisory.window.MinaflixScrape.metadataFromPreviewModal(advisory.window.document);
+    expect(cleaned.synopsis).toBe('A con artist spends one hundred days inside a perfect marriage.');
+    expect(advisory.window.MinaflixScrape.isAdvisorySynopsis('Suitable for ages 16 and older.')).toBe(true);
+    expect(advisory.window.MinaflixScrape.isAdvisorySynopsis('Recommended for ages 15 and up.')).toBe(true);
   });
 
   it('opens the About section and does not click Play', () => {

@@ -25,7 +25,7 @@ function entryFrom(value: unknown): CatalogTitle | null {
     showTitle: typeof record.showTitle === 'string' ? record.showTitle : null,
     netflixId,
     watchedAt: null,
-    synopsis: typeof record.synopsis === 'string' ? record.synopsis : null,
+    synopsis: realSynopsis(record.synopsis),
     image: typeof record.image === 'string' && record.image.startsWith('https://') ? record.image : null,
     backdrop: typeof record.backdrop === 'string' && record.backdrop.startsWith('https://') ? record.backdrop : null,
     year: typeof record.year === 'string' ? record.year : null,
@@ -44,6 +44,13 @@ function entryFrom(value: unknown): CatalogTitle | null {
     trailerTitle: typeof record.trailerTitle === 'string' ? record.trailerTitle : null,
     trailerChannel: typeof record.trailerChannel === 'string' ? record.trailerChannel : null,
   };
+}
+
+export function realSynopsis(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.replace(/\s+/g, ' ').trim();
+  if (!text || /parents strongly cautioned|may not be suitable for ages|suitable for|recommended for ages|viewer discretion|mature content/i.test(text)) return null;
+  return text;
 }
 
 function youtubeId(value: unknown): string | null {
@@ -137,7 +144,7 @@ export function titleFromCatalog(entry: CatalogTitle): Title {
     mediaType: entry.mediaType === 'tv' ? 'tv' : 'movie',
     title: entry.title,
     titleAr: '',
-    overview: entry.synopsis || '',
+    overview: realSynopsis(entry.synopsis) || '',
     overviewAr: '',
     posterUrl: entry.image ?? null,
     backdropUrl: entry.backdrop ?? entry.image ?? null,
@@ -193,7 +200,7 @@ export function mergeCatalogTitle(current: CatalogTitle, incoming: CatalogTitle)
     ...incoming,
     ...current,
     title: titleRank(incoming.title) > titleRank(current.title) ? incoming.title : current.title,
-    synopsis: filledText(current.synopsis) || filledText(incoming.synopsis) || null,
+    synopsis: realSynopsis(current.synopsis) || realSynopsis(incoming.synopsis) || null,
     image: current.image || incoming.image || null,
     backdrop: current.backdrop || incoming.backdrop || null,
     year: filledText(current.year) || filledText(incoming.year) || null,

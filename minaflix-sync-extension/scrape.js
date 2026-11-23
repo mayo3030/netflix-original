@@ -335,7 +335,7 @@
   function metadataFromVideo(video) {
     if (!video || typeof video !== 'object') return null;
     const title = asText(video.title);
-    const synopsis = asText(video.synopsis) || asText(video.summary?.synopsis);
+    const synopsis = usableSynopsis(asText(video.synopsis) || asText(video.summary?.synopsis));
     const yearNumber = asNumber(video.year);
     const runtimeRaw = asNumber(video.runtime);
     const runtimeMinutes = runtimeRaw == null ? null : (runtimeRaw > 300 ? Math.round(runtimeRaw / 60) : runtimeRaw);
@@ -984,7 +984,7 @@
     const mediaType = /show|series|season/.test(typeName) || seasons ? 'tv' : (/movie/.test(typeName) || runtimeMinutes ? 'movie' : null);
     return {
       title: asText(entity.title) || asText(entity.name),
-      synopsis: asText(entity.synopsis) || asText(entity.contextualSynopsis?.text) || asText(entity.narrativeText) || asText(entity.shortSynopsis),
+      synopsis: usableSynopsis(asText(entity.synopsis) || asText(entity.contextualSynopsis?.text) || asText(entity.narrativeText) || asText(entity.shortSynopsis)),
       year: yearFromEntity(entity),
       maturity: maturityFromEntity(entity),
       runtimeMinutes,
@@ -1514,10 +1514,37 @@
     return true;
   }
 
+  function isAdvisorySynopsis(value) {
+    const text = clean(value);
+    if (!text) return false;
+    return /parents strongly cautioned|may not be suitable for ages|suitable for|recommended for ages|viewer discretion|mature content/i.test(text);
+  }
+
+  function usableSynopsis(value) {
+    const text = clean(value);
+    if (!text || isAdvisorySynopsis(text)) return '';
+    return text;
+  }
+
+  function synopsisFromModal(scope) {
+    const nodes = [...scope.querySelectorAll('[data-uia*="synopsis"], [class*="synopsis"], [data-uia*="preview-modal-synopsis"], p')];
+    const texts = [];
+    for (const node of nodes) {
+      if (node.closest('[class*="maturity"], [data-uia*="maturity"], [class*="advisory"]')) continue;
+      const marker = `${node.getAttribute('data-uia') || ''} ${node.className || ''}`;
+      if (/maturity|advisory/i.test(marker)) continue;
+      const text = usableSynopsis(node.textContent);
+      if (!text || sectionHeading(text)) continue;
+      if (text.length < 40 && !/synopsis/i.test(marker)) continue;
+      texts.push(text);
+    }
+    return texts.sort((left, right) => right.length - left.length)[0] || '';
+  }
+
   function modalSignature(doc) {
     const modal = findPreviewModal(doc);
     if (!modal) return '';
-    const synopsis = clean(modal.querySelector('[data-uia*="synopsis"], [class*="synopsis"]')?.textContent);
+    const synopsis = synopsisFromModal(modal);
     const logo = logoTitle(modal);
     const year = (/\b(?:19|20)\d{2}\b/.exec(clean(modal.querySelector('[class*="detailsMetadata"], [data-uia*="year"], .year')?.textContent)) || [''])[0];
     return `${logo}|${year}|${synopsis}`;
@@ -1527,9 +1554,7 @@
     const modal = findPreviewModal(doc);
     if (!modal) return null;
     const scope = modal.closest('[role="dialog"]') || modal;
-    const explicitSynopsis = clean(scope.querySelector('[data-uia*="synopsis"], [class*="synopsis"], [data-uia*="preview-modal-synopsis"]')?.textContent);
-    const paragraphs = [...scope.querySelectorAll('p, [data-uia*="synopsis"], [class*="synopsis"]')].map((node) => clean(node.textContent)).filter((text) => text.length > 40 && !sectionHeading(text) && !/^(cast|genres?|directors?|creators?|maturity)\b/i.test(text));
-    const synopsis = explicitSynopsis || paragraphs.sort((left, right) => right.length - left.length)[0] || '';
+    const synopsis = synopsisFromModal(scope);
     const metaText = clean(scope.querySelector('[class*="detailsMetadata"]')?.textContent);
     const yearMatch = /\b(?:19|20)\d{2}\b/.exec(clean(scope.querySelector('[data-uia*="year"], .year')?.textContent) || metaText || '');
     const maturity = clean(scope.querySelector('[class*="maturity"], [data-uia*="maturity"]')?.textContent);
@@ -1673,5 +1698,6 @@
     modalMatches,
     sectionHeading,
     openAboutSection,
+    isAdvisorySynopsis,
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);
