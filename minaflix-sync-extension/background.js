@@ -151,18 +151,78 @@ function applyTitleDetails(items, byId) {
   });
 }
 
+const CATALOG_ALARM = 'minaflix-catalog-resume';
+const CATALOG_PROGRESS = 'minaflix.catalog.progress';
+const progressLines = [];
+let catalogTask = null;
+
+function catalogSend(payload) {
+  if (payload?.text && (payload.type === 'progress' || payload.type === 'summary' || payload.type === 'done' || payload.type === 'error')) {
+    progressLines.push(payload.text);
+    if (progressLines.length > 12) progressLines.shift();
+  }
+  const record = { ...payload, lines: [...progressLines] };
+  chrome.storage.local.set({ [CATALOG_PROGRESS]: record }).catch(() => {});
+  if (!activePort) return;
+  try { activePort.postMessage(record); } catch { /* The popup can close without stopping the sync. */ }
+}
+
+async function replayStatus() {
+  const stored = await chrome.storage.local.get(CATALOG_PROGRESS);
+  const record = stored[CATALOG_PROGRESS];
+  if (record && activePort) {
+    try { activePort.postMessage(record); } catch { /* Popup closed. */ }
+  }
+  if (catalogTask) catalogSend({ type: 'progress', text: 'Catalog sync is running in the background. Closing this popup will not stop it.' });
+}
+
+function ensureCatalog(message) {
+  if (catalogTask) {
+    catalogSend({ type: 'progress', text: 'Catalog sync is running in the background. Closing this popup will not stop it.' });
+    return catalogTask;
+  }
+  catalogTask = (async () => {
+    if (message?.resume) {
+      const existing = await readCatalogJob();
+      if (!existing?.rows?.length) return;
+    }
+    chrome.alarms.create(CATALOG_ALARM, { periodInMinutes: 1 });
+    await syncCatalog(message || { resume: true });
+  })().finally(() => {
+    catalogTask = null;
+  });
+  return catalogTask;
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === CATALOG_ALARM) void ensureCatalog({ resume: true });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  void ensureCatalog({ resume: true });
+});
+
+void ensureCatalog({ resume: true });
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'minaflix-export') return;
   activePort = port;
-  let active = true;
   port.onDisconnect.addListener(() => {
-    active = false;
     if (activePort === port) activePort = null;
   });
   port.onMessage.addListener((message) => {
+    if (message?.type === 'watch') {
+      void replayStatus();
+      return;
+    }
     if (message?.type !== 'start') return;
-    const run = message.mode === 'catalog' ? syncCatalog : exportAccount;
-    void run(port, () => active, message);
+    if (message.mode === 'catalog') {
+      void ensureCatalog(message);
+      return;
+    }
+    let listActive = true;
+    port.onDisconnect.addListener(() => { listActive = false; });
+    void exportAccount(port, () => listActive);
   });
 });
 
@@ -307,17 +367,43 @@ async function pageCall(tabId, payload) {
       if (request.op === 'details') return api.fetchMemberMetadata(globalThis, request.ids);
       if (request.op === 'caches') return api.readLiveCaches(globalThis, request.ids);
       if (request.op === 'graphql') return api.fetchGraphqlDetails(globalThis, request.ids);
-      if (request.op === 'modal') return api.readLiveModal(request.id);
-      if (request.op === 'modal-read') return api.readOpenModal(request.id);
+      if (request.op === 'modal') return api.readLiveModal(request.id, request.title || '');
+      if (request.op === 'modal-read') return api.readOpenModal(request.id, request.title || '');
       return null;
     },
   });
   return result?.result;
 }
 
+function sectionHeading(value) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return !text || /^(episodes|more like this|trailers(?:\s*&\s*more)?|about)$/i.test(text) || /^about\s+/i.test(text);
+}
+
+function cardTitleOverDetail(cardTitle, detailTitle) {
+  const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const card = clean(cardTitle);
+  const detail = clean(detailTitle);
+  if (card && !sectionHeading(card)) return card;
+  if (detail && !sectionHeading(detail)) return detail;
+  const candidates = [clean(detail).replace(/^about\s+/i, ''), clean(card).replace(/^about\s+/i, '')];
+  for (const stripped of candidates) {
+    if (stripped && !sectionHeading(stripped) && !/^(episodes|more like this)$/i.test(stripped)) return stripped;
+  }
+  return card || detail || '';
+}
+
+function cardTitleFor(job, id) {
+  for (const row of job.rows || []) {
+    const found = (row.titles || []).find((item) => item.netflixId === id && item.title && !sectionHeading(item.title));
+    if (found) return found.title;
+  }
+  return '';
+}
+
 function catalogTitle(item, meta) {
   return {
-    title: meta?.title || item.title || `Title ${item.netflixId}`,
+    title: cardTitleOverDetail(item.title, meta?.title) || `Title ${item.netflixId}`,
     showTitle: null,
     netflixId: item.netflixId,
     watchedAt: null,
@@ -370,7 +456,7 @@ async function downloadCatalog(rows, summary, errors) {
     await chrome.downloads.download({
       url: `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(payload))}`,
       filename,
-      saveAs: index === 0,
+      saveAs: index === 0 && Boolean(activePort),
       conflictAction: 'uniquify',
     });
   }
@@ -396,8 +482,23 @@ function prepareJob(job, message) {
   };
   job.errors = Array.isArray(job.errors) ? job.errors : [];
   job.detailAttempts = job.detailAttempts || 0;
-  job.detailCap = parseCap(message?.detailCap);
+  if (message && Object.prototype.hasOwnProperty.call(message, 'detailCap')) job.detailCap = parseCap(message.detailCap);
+  else if (!Object.prototype.hasOwnProperty.call(job, 'detailCap')) job.detailCap = null;
   job.graphqlStopped = Boolean(job.graphqlStopped);
+  if (job.detailVersion !== 2) {
+    const redo = [];
+    for (const [id, meta] of Object.entries(job.details)) {
+      if (meta?.source === 'modal') {
+        delete job.details[id];
+        redo.push(id);
+      }
+    }
+    job.paths.modal = 0;
+    job.graphqlStopped = false;
+    const queued = new Set([...job.pending, ...job.forModal]);
+    for (const id of redo) if (!queued.has(id)) job.pending.push(id);
+    job.detailVersion = 2;
+  }
   return job;
 }
 
@@ -464,9 +565,9 @@ async function applyApiDetails(tabId, job, send) {
   send({ type: 'progress', text: added ? `Details via member API: ${added}.` : 'Member API had no title details.' });
 }
 
-async function applyGraphqlDetails(tabId, job, send, isActive) {
+async function applyGraphqlDetails(tabId, job, send) {
   if (job.graphqlStopped) return;
-  while (isActive() && job.pending.length) {
+  while (job.pending.length) {
     const ids = takePending(job, 20);
     if (!ids.length) return;
     send({ type: 'progress', text: `GraphQL details for ${ids.length} titles…` });
@@ -497,10 +598,10 @@ async function applyGraphqlDetails(tabId, job, send, isActive) {
   }
 }
 
-async function readModalDetail(tabId, id) {
+async function readModalDetail(tabId, id, title) {
   let result = null;
   try {
-    result = await pageCall(tabId, { op: 'modal', id });
+    result = await pageCall(tabId, { op: 'modal', id, title });
   } catch (error) {
     result = { error: error instanceof Error ? error.message : 'modal reader failed' };
   }
@@ -509,16 +610,16 @@ async function readModalDetail(tabId, id) {
     await chrome.tabs.update(tabId, { url: `https://www.netflix.com/browse?jbv=${id}`, active: true });
     await navigate(tabId, (url) => String(url).includes(`jbv=${id}`) || String(url).includes('/browse'));
     await sleep(800);
-    const opened = await pageCall(tabId, { op: 'modal-read', id });
+    const opened = await pageCall(tabId, { op: 'modal-read', id, title });
     return opened?.meta ? opened : { error: opened?.error || result?.error || 'preview modal was not readable after navigation' };
   } catch (error) {
     return { error: error instanceof Error ? error.message : 'modal navigation failed' };
   }
 }
 
-async function applyModalDetails(tabId, job, send, isActive) {
+async function applyModalDetails(tabId, job, send) {
   let streak = 0;
-  while (isActive()) {
+  while (true) {
     const fromGraphqlMiss = job.forModal.length > 0;
     if (!fromGraphqlMiss && typeof job.detailCap === 'number' && job.detailAttempts >= job.detailCap) {
       if (job.pending.length) send({ type: 'progress', text: `Detail limit ${job.detailCap} reached. Remaining titles keep their card images.` });
@@ -530,7 +631,7 @@ async function applyModalDetails(tabId, job, send, isActive) {
     const id = list.shift();
     if (!fromGraphqlMiss) job.detailAttempts += 1;
     send({ type: 'progress', text: `Modal for ${id}. ${pathSummary(job)}. ${list.length} left.` });
-    const result = await readModalDetail(tabId, id);
+    const result = await readModalDetail(tabId, id, cardTitleFor(job, id));
     if (result?.meta) {
       rememberDetail(job, id, result.meta);
       streak = 0;
@@ -554,16 +655,13 @@ async function applyModalDetails(tabId, job, send, isActive) {
   }
 }
 
-async function syncCatalog(port, isActive, message) {
-  const send = (payload) => {
-    if (isActive()) port.postMessage(payload);
-  };
+async function syncCatalog(message) {
+  const send = catalogSend;
   try {
     send({ type: 'progress', text: 'Opening Netflix browse…' });
     const opened = await openAndGo('https://www.netflix.com/browse', (url) => {
       try { return new URL(url).pathname.startsWith('/browse'); } catch { return false; }
     });
-    if (!isActive()) return;
     let job = await readCatalogJob();
     if (!job?.rows?.length) {
       send({ type: 'progress', text: 'Reading home rows…' });
@@ -587,7 +685,6 @@ async function syncCatalog(port, isActive, message) {
       if (!rows.length) {
         send({ type: 'progress', text: 'Reading genre pages…' });
         for (const genre of genres.slice(0, 12)) {
-          if (!isActive()) return;
           await sleep(1000);
           send({ type: 'progress', text: `Reading genre ${genre.name}…` });
           const page = await pageCall(opened.tabId, { op: 'html', url: `https://www.netflix.com/browse/genre/${genre.id}` });
@@ -596,31 +693,25 @@ async function syncCatalog(port, isActive, message) {
         }
       }
       const pending = [...new Set(rows.flatMap((row) => row.titles.map((item) => item.netflixId)))];
-      job = prepareJob({ rows, details: {}, pending }, message);
+      job = prepareJob({ rows, details: {}, pending, detailVersion: 2 }, message);
       await writeCatalogJob(job);
     } else {
       job = prepareJob(job, message);
       send({ type: 'progress', text: `Resuming catalog sync. ${job.pending.length + job.forModal.length} titles left.` });
     }
-    if (isActive()) {
-      try {
-        await applyCachedDetails(opened.tabId, job, send);
-      } catch (error) {
-        job.errors.push({ section: 'details', path: 'cache', message: error instanceof Error ? error.message : 'cache read failed' });
-      }
-      if (job.detailCap !== 0) {
-        await applyApiDetails(opened.tabId, job, send);
-        if (isActive()) await applyGraphqlDetails(opened.tabId, job, send, isActive);
-        if (isActive()) await applyModalDetails(opened.tabId, job, send, isActive);
-      } else {
-        send({ type: 'progress', text: 'Detail limit 0. Saving card images without more lookups.' });
-      }
-      await writeCatalogJob(job);
+    try {
+      await applyCachedDetails(opened.tabId, job, send);
+    } catch (error) {
+      job.errors.push({ section: 'details', path: 'cache', message: error instanceof Error ? error.message : 'cache read failed' });
     }
-    if (!isActive()) {
-      send({ type: 'progress', text: 'Paused. Open the extension again to resume.' });
-      return;
+    if (job.detailCap !== 0) {
+      await applyApiDetails(opened.tabId, job, send);
+      await applyGraphqlDetails(opened.tabId, job, send);
+      await applyModalDetails(opened.tabId, job, send);
+    } else {
+      send({ type: 'progress', text: 'Detail limit 0. Saving card images without more lookups.' });
     }
+    await writeCatalogJob(job);
     const rows = job.rows.map((row) => ({
       name: row.name,
       titles: row.titles.map((item) => catalogTitle(item, job.details[item.netflixId])),
@@ -632,8 +723,9 @@ async function syncCatalog(port, isActive, message) {
     const summary = `Exported ${count} catalog titles in ${rows.length} rows. Images ${images}. Details ${detailed} (${pathSummary(job)}).${failure ? ` ${failure.message}` : ''}`;
     send({ type: 'summary', text: summary });
     await sleep(400);
-    const parts = await downloadCatalog(rows, summary, job.errors || []);
+    await downloadCatalog(rows, summary, job.errors || []);
     await chrome.storage.local.remove(CATALOG_JOB);
+    await chrome.alarms.clear(CATALOG_ALARM);
     send({ type: 'done', text: summary });
   } catch (error) {
     send({ type: 'error', text: error instanceof Error ? error.message : 'Catalog sync failed. Open the extension again to resume.' });

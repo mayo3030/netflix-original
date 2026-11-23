@@ -1056,15 +1056,22 @@
     return match ? match[1] : null;
   }
 
-  function rawDetailQuery(ids) {
+  function unifiedDetailQuery(ids) {
     const fields = [
-      'videoId', 'title', 'synopsis', 'contextualSynopsis { text }', 'latestYear', 'releaseYear', 'year',
-      'runtimeSec', 'displayRuntime', 'seasonCount', 'numSeasons', 'numSeasonsLabel', 'seasons { totalCount }',
-      'contentAdvisory { certificationValue }', 'genreTags { name }', 'genres { name }',
-      'cast { name }', 'creators { name }', 'directors { name }', 'storyArt { url }', 'boxArt { url }',
+      '__typename', 'unifiedEntityId', 'videoId', 'title', 'synopsis', 'contextualSynopsis { text }',
+      'latestYear', 'releaseYear', 'year', 'runtimeSec', 'displayRuntime', 'seasonCount', 'numSeasons',
+      'numSeasonsLabel', 'seasons { totalCount }', 'contentAdvisory { certificationValue }',
+      'genreTags { name }', 'genres { name }', 'cast { name }', 'creators { name }', 'directors { name }',
+      'storyArt { url }', 'boxArt { url }',
     ].join(' ');
-    const selections = ids.map((id) => `v${id}: video(videoId: ${Number(id)}) { ${fields} }`).join('\n');
-    return `query MinaflixDetails { ${selections} }`;
+    return {
+      query: `query MinaflixDetails($ids: [ID!]!) { unifiedEntities(unifiedEntityIds: $ids) { ${fields} } }`,
+      variables: { ids: ids.map((id) => `Video:${id}`) },
+    };
+  }
+
+  function rawDetailQuery(ids) {
+    return unifiedDetailQuery(ids).query;
   }
 
   function detailModalBody(id, queryId) {
@@ -1132,15 +1139,15 @@
     const byId = {};
     const notes = [];
     if (!list.length) return publishDetails('graphql', byId, null);
-    const raw = await postGraphql(endpoint, { query: rawDetailQuery(list) });
+    const raw = await postGraphql(endpoint, unifiedDetailQuery(list));
     if (raw.ok) Object.assign(byId, keepWanted(parseGraphqlDetails(raw.json), list));
     else if (raw.error) notes.push(raw.error);
     const missing = list.filter((id) => !byId[id]);
-    if (missing.length && !Object.keys(byId).length) {
-      const queryId = discoverPersistedQuery(win, 'DetailModal') || DETAIL_MODAL_QUERY_ID;
+    const discovered = discoverPersistedQuery(win, 'DetailModal');
+    if (missing.length && !Object.keys(byId).length && discovered) {
       let failures = 0;
       for (const id of missing) {
-        const posted = await postGraphql(endpoint, detailModalBody(id, queryId));
+        const posted = await postGraphql(endpoint, detailModalBody(id, discovered));
         const parsed = posted.ok ? keepWanted(parseGraphqlDetails(posted.json), [id]) : {};
         if (parsed[id]) {
           byId[id] = parsed[id];
@@ -1148,7 +1155,7 @@
         } else {
           failures += 1;
           notes.push(posted.error || `DetailModal had no metadata for ${id}`);
-          if (failures >= 2) break;
+          if (failures >= 1) break;
         }
         await sleep(900);
       }
@@ -1158,23 +1165,157 @@
     return publishDetails('graphql', byId, error);
   }
 
-  function labeledList(root, label) {
-    const pattern = new RegExp(`^${label}\\s*:\\s*(.+)$`, 'i');
-    for (const node of root.querySelectorAll('span, div, p, li')) {
-      const text = clean(node.textContent);
-      if (!text || text.length > 500) continue;
-      const match = pattern.exec(text);
-      if (!match) continue;
-      const names = match[1].split(/[,،]/).map((name) => clean(name)).filter((name) => name && name.length < 80);
-      if (names.length) return names.slice(0, 16);
+  function sectionHeading(value) {
+    const text = clean(value);
+    return !text || /^(episodes|more like this|trailers(?:\s*&\s*more)?|about)$/i.test(text) || /^about\s+/i.test(text);
+  }
+
+  function stripAbout(value) {
+    return clean(String(value || '').replace(/^about\s+/i, ''));
+  }
+
+  function cardTitleOverDetail(cardTitle, detailTitle) {
+    const card = clean(cardTitle);
+    const detail = clean(detailTitle);
+    if (card && !sectionHeading(card)) return card;
+    if (detail && !sectionHeading(detail)) return detail;
+    const candidates = [stripAbout(detail), stripAbout(card)];
+    for (const stripped of candidates) {
+      if (stripped && !sectionHeading(stripped) && !/^(episodes|more like this)$/i.test(stripped)) return stripped;
     }
-    return [];
+    return card || detail || '';
+  }
+
+  function titlesEqual(left, right) {
+    const norm = (value) => stripAbout(value).toLowerCase().replace(/[^a-z0-9\u0600-\u06ff]+/gi, ' ').trim();
+    const a = norm(left);
+    const b = norm(right);
+    return Boolean(a && a === b);
+  }
+
+  function directText(node) {
+    return clean([...node.childNodes].filter((child) => child.nodeType === 3).map((child) => child.textContent).join(' '));
+  }
+
+  function labelKind(text) {
+    const value = clean(text).replace(/:$/, '');
+    if (/^cast$/i.test(value)) return 'cast';
+    if (/^genres?$/i.test(value)) return 'genres';
+    if (/^creators?$/i.test(value)) return 'creators';
+    if (/^directors?$/i.test(value)) return 'directors';
+    if (/^this (show|movie|series|film) is$/i.test(value)) return 'moods';
+    return '';
+  }
+
+  function namesFromText(text) {
+    return String(text || '').split(/[,،]/).map((part) => clean(part)).filter((name) => name && name.length < 80 && !labelKind(name) && !/cast:|genres?:|creators?:|directors?:|this (?:show|movie|series|film) is/i.test(name));
+  }
+
+  function namesAfterLabel(labelNode) {
+    const parent = labelNode.parentElement;
+    if (!parent) return [];
+    const names = [];
+    let seen = false;
+    for (const child of parent.childNodes) {
+      const element = child.nodeType === 1 ? child : null;
+      if (element === labelNode || (element && element.contains(labelNode))) {
+        seen = true;
+        continue;
+      }
+      if (!seen) continue;
+      const text = clean(child.textContent);
+      if (!text) continue;
+      if (labelKind(text.split(':')[0])) break;
+      names.push(...namesFromText(text));
+    }
+    return names.slice(0, 16);
+  }
+
+  function aboutLists(scope) {
+    const found = { cast: [], genres: [], creators: [], directors: [], moods: [] };
+    for (const node of scope.querySelectorAll('span, div, dt, p, li')) {
+      const own = directText(node).replace(/:$/, '');
+      const short = clean(node.textContent);
+      const kind = labelKind(own) || (short.length <= 40 ? labelKind(short.replace(/:$/, '')) : '');
+      if (!kind || found[kind].length) continue;
+      const siblingNames = namesAfterLabel(node);
+      const inline = /:\s*(.+)$/.exec(short);
+      const names = siblingNames.length ? siblingNames : (inline && short.length <= 240 ? namesFromText(inline[1]) : []);
+      if (names.length) found[kind] = names.slice(0, 16);
+    }
+    const blob = String(scope?.textContent || '').split(/(?=(?:Creators?|Cast|Genres?|Directors?|This (?:Show|Movie|Series|Film) is)\s*:)/i);
+    for (const part of blob) {
+      const match = /^(creators?|cast|genres?|directors?|this (?:show|movie|series|film) is)\s*:\s*([\s\S]+)$/i.exec(clean(part));
+      if (!match) continue;
+      const kind = labelKind(match[1]);
+      if (!kind || found[kind].length) continue;
+      found[kind] = namesFromText(match[2]).slice(0, 16);
+    }
+    return found;
+  }
+
+  function findPreviewModal(doc) {
+    const nodes = [...doc.querySelectorAll('[data-uia*="previewModal"], [class*="previewModal"], [data-uia*="preview-modal"]')];
+    const generic = [...doc.querySelectorAll('[data-uia*="modal"]')].find((node) => node.querySelector('[data-uia*="synopsis"], [class*="synopsis"], [class*="detailsMetadata"]'));
+    return nodes.find((node) => !nodes.some((other) => other !== node && other.contains(node))) || nodes[0] || generic || null;
+  }
+
+  function logoTitle(scope) {
+    if (!scope) return '';
+    const logo = scope.querySelector('[class*="titleTreatment"] img, [class*="title-treatment"] img, img[class*="logo"], [data-uia*="title-treatment"] img, [data-uia*="titleTreatment"] img');
+    const raw = clean(logo?.getAttribute('alt')) || clean(logo?.getAttribute('aria-label')) || clean(logo?.closest('[aria-label]')?.getAttribute('aria-label'));
+    const title = stripAbout(raw);
+    return title && !sectionHeading(title) ? title : '';
+  }
+
+  function artworkFromElement(element) {
+    if (!element) return [];
+    const className = `${element.className || ''} ${element.parentElement?.className || ''}`;
+    if (/titleTreatment|title-treatment|logo/i.test(className)) return [];
+    const srcset = element.getAttribute?.('srcset') || '';
+    const parts = srcset.split(',').map((part) => part.trim()).filter(Boolean);
+    const twox = parts.find((part) => /\s2x$/i.test(part));
+    const chosen = (twox || parts[parts.length - 1] || '').replace(/\s+\d+(?:\.\d+)?x$/i, '').trim();
+    const urls = [chosen, element.currentSrc, element.getAttribute?.('src')].map((value) => artworkUrl(value)).filter(Boolean);
+    const style = element.getAttribute?.('style') || '';
+    const background = /url\((['"]?)(https:[^)'"]+)\1\)/i.exec(style);
+    if (background) {
+      const url = artworkUrl(background[2]);
+      if (url) urls.push(url);
+    }
+    return urls;
+  }
+
+  function backdropFromModal(scope) {
+    const hero = scope.querySelector('[class*="player"], [class*="storyArt"], [class*="boxart"], [class*="billboard"]') || scope;
+    const urls = [];
+    for (const element of [hero, ...hero.querySelectorAll('img, div')]) urls.push(...artworkFromElement(element));
+    return urls.find((src) => /storyart|backdrop|billboard|boxart|hero/i.test(src)) || urls[0] || null;
+  }
+
+  function modalMatches(doc, id, expectedTitle) {
+    const modal = findPreviewModal(doc);
+    if (!modal || !/^\d{1,12}$/.test(String(id || ''))) return false;
+    const href = new RegExp(`(?:[?&]jbv=|/title/|/watch/)${id}(?:\\D|$)`);
+    const viewUrl = doc.defaultView?.location?.href || '';
+    if (href.test(viewUrl)) return true;
+    if ([...modal.querySelectorAll('a, [href]')].some((node) => href.test(node.getAttribute('href') || ''))) return true;
+    if (modal.querySelector(`[data-videoid="${id}"], [data-video-id="${id}"]`)) return true;
+    const logo = logoTitle(modal);
+    return Boolean(expectedTitle && logo && titlesEqual(logo, expectedTitle));
+  }
+
+  function modalSignature(doc) {
+    const modal = findPreviewModal(doc);
+    if (!modal) return '';
+    const synopsis = clean(modal.querySelector('[data-uia*="synopsis"], [class*="synopsis"]')?.textContent);
+    const logo = logoTitle(modal);
+    const year = (/\b(?:19|20)\d{2}\b/.exec(clean(modal.querySelector('[class*="detailsMetadata"], [data-uia*="year"], .year')?.textContent)) || [''])[0];
+    return `${logo}|${year}|${synopsis}`;
   }
 
   function metadataFromPreviewModal(doc) {
-    const nodes = [...doc.querySelectorAll('[data-uia*="previewModal"], [class*="previewModal"], [data-uia*="preview-modal"]')];
-    const generic = [...doc.querySelectorAll('[data-uia*="modal"]')].find((node) => node.querySelector('[data-uia*="synopsis"], [class*="synopsis"], [class*="detailsMetadata"]'));
-    const modal = nodes.find((node) => !nodes.some((other) => other !== node && other.contains(node))) || nodes[0] || generic;
+    const modal = findPreviewModal(doc);
     if (!modal) return null;
     const scope = modal.closest('[role="dialog"]') || modal;
     const synopsis = clean(scope.querySelector('[data-uia*="synopsis"], [class*="synopsis"]')?.textContent);
@@ -1185,21 +1326,21 @@
     const seasons = seasonsFromText(durationText) || seasonsFromText(metaText);
     const runtimeMinutes = runtimeFromText(durationText) || (/season/i.test(metaText) ? null : runtimeFromText(metaText));
     const about = scope.querySelector('[data-uia*="about"], [class*="about"]') || scope;
-    const images = [...scope.querySelectorAll('img')].map((img) => artworkUrl(img.getAttribute('src') || img.currentSrc)).filter(Boolean);
-    const backdrop = images.find((src) => /storyart|backdrop|billboard/i.test(src)) || null;
+    const lists = aboutLists(about);
+    const backdrop = backdropFromModal(scope);
     return {
-      title: clean(scope.querySelector('h2, h3, [data-uia*="title"]')?.textContent),
+      title: logoTitle(scope),
       synopsis,
       year: yearMatch ? yearMatch[0] : '',
       maturity,
       runtimeMinutes,
       seasons,
-      genres: labeledList(about, 'genres?').length ? labeledList(about, 'genres?') : labeledList(scope, 'genres?'),
-      cast: labeledList(about, 'cast').length ? labeledList(about, 'cast') : labeledList(scope, 'cast'),
-      creators: labeledList(scope, 'creators?'),
-      directors: labeledList(scope, 'directors?'),
+      genres: [...new Set([...lists.genres, ...lists.moods])].slice(0, 16),
+      cast: lists.cast,
+      creators: lists.creators,
+      directors: lists.directors,
       mediaType: seasons ? 'tv' : (runtimeMinutes ? 'movie' : null),
-      image: images.find((src) => src !== backdrop) || null,
+      image: null,
       backdrop,
       source: 'modal',
     };
@@ -1225,33 +1366,52 @@
     return 'pushState';
   }
 
-  async function waitForModal(timeoutMs) {
+  async function revealModalAbout(doc) {
+    const modal = findPreviewModal(doc);
+    if (!modal) return;
+    const about = modal.querySelector('[data-uia*="about"], [class*="about"]');
+    if (about && typeof about.scrollIntoView === 'function') {
+      try { about.scrollIntoView({ block: 'center' }); } catch { about.scrollIntoView(); }
+    }
+    const scrollers = [modal, ...modal.querySelectorAll('div')].filter((element) => element.scrollHeight > element.clientHeight + 40);
+    for (const element of scrollers) element.scrollTop = element.scrollHeight;
+    await sleep(350);
+  }
+
+  async function waitForMatchingModal(id, expectedTitle, before, timeoutMs) {
     const started = Date.now();
     const limit = timeoutMs || 8000;
     while (Date.now() - started < limit) {
+      await revealModalAbout(document);
+      const signature = modalSignature(document);
       const meta = metadataFromPreviewModal(document);
-      if (meta && useful(meta)) return meta;
+      const matches = modalMatches(document, id, expectedTitle);
+      if (meta && useful(meta) && matches && signature && signature !== before) {
+        meta.source = 'modal';
+        meta.title = logoTitle(findPreviewModal(document)) || meta.title;
+        return meta;
+      }
       await sleep(200);
     }
     return null;
   }
 
-  async function readLiveModal(id) {
+  async function readLiveModal(id, expectedTitle) {
+    const before = modalSignature(document);
     closePreviewModal(document);
     await sleep(300);
     const via = openTitleModal(id);
-    const meta = await waitForModal();
-    if (!meta) return { path: 'modal', via, error: `preview modal did not show synopsis, year, maturity, or cast after ${via}` };
-    meta.source = 'modal';
+    const meta = await waitForMatchingModal(id, expectedTitle, before, 8000);
+    if (!meta) return { path: 'modal', via, error: `skipped ${id}: the open modal did not match this title` };
     closePreviewModal(document);
     publishDetails('modal', { [String(id)]: meta }, null);
     return { path: 'modal', via, meta };
   }
 
-  async function readOpenModal(id) {
-    const meta = await waitForModal(12000);
-    if (!meta) return { path: 'modal', via: 'navigation', error: 'preview modal had no synopsis, year, maturity, or cast' };
-    meta.source = 'modal';
+  async function readOpenModal(id, expectedTitle) {
+    const before = '';
+    const meta = await waitForMatchingModal(id, expectedTitle, before, 12000);
+    if (!meta) return { path: 'modal', via: 'navigation', error: `skipped ${id}: the open modal did not match this title` };
     closePreviewModal(document);
     publishDetails('modal', { [String(id)]: meta }, null);
     return { path: 'modal', via: 'navigation', meta };
@@ -1292,5 +1452,8 @@
     openTitleModal,
     readLiveModal,
     readOpenModal,
+    cardTitleOverDetail,
+    modalMatches,
+    sectionHeading,
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

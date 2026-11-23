@@ -61,4 +61,20 @@ describe('parseCatalogFile', () => {
     expect(heroKickerKey(hero, 'mock')).toBe('yourCatalog');
     expect(heroKickerKey({ netflixId: null }, 'mock')).toBe('demoCatalog');
   });
+
+  it('prefers a card title over modal headings for the same Netflix id', () => {
+    const catalog = parseCatalogFile(JSON.stringify({
+      kind: 'catalog',
+      rows: [
+        { name: 'Drama', titles: [{ title: 'Episodes', netflixId: '70281312', synopsis: 'A fugitive helps the FBI.' }] },
+        { name: 'Top Picks', titles: [{ title: 'The Blacklist', netflixId: '70281312', synopsis: 'A fugitive helps the FBI.' }] },
+        { name: 'Kids', titles: [{ title: 'About Animals', netflixId: '81757047', synopsis: 'A nature series.' }] },
+        { name: 'More', titles: [{ title: 'More Like This', netflixId: '80000001' }] },
+      ],
+    }));
+    const blacklist = catalog.rows.flatMap((row) => row.titles).filter((title) => title.netflixId === '70281312');
+    expect(blacklist.every((title) => title.title === 'The Blacklist')).toBe(true);
+    expect(catalog.rows[2]?.titles[0]?.title).toBe('Animals');
+    expect(catalog.rows[3]?.titles[0]?.title).toBe('More Like This');
+  });
 });

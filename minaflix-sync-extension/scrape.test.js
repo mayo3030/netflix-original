@@ -358,7 +358,11 @@ describe('live browse carousel', () => {
 
 const previewModal = `
   <div class="previewModal" data-uia="previewModal--container" role="dialog">
-    <h2>Heartland</h2>
+    <h2>Episodes</h2>
+    <h3>About Heartland</h3>
+    <div class="previewModal--player" style="background-image: url(https://occ-0-1.nflxso.net/dnm/api/v6/hero.webp)">
+      <img class="previewModal--player-titleTreatment-logo" alt="Heartland">
+    </div>
     <div class="previewModal--detailsMetadata">
       <div class="previewModal--detailsMetadata-left">
         <span class="year">2007</span>
@@ -368,10 +372,11 @@ const previewModal = `
     </div>
     <p class="preview-modal-synopsis" data-uia="preview-modal-synopsis">Amy heals horses and the people around them.</p>
     <section data-uia="previewModal--details-about">
-      <div>Cast: Amber Marshall, Graham Wardle</div>
-      <div>Genres: Drama, Family</div>
+      <div class="previewModal--tags"><span class="previewModal--tags-label">Creators:</span><span>Heather Conkie</span></div>
+      <div class="previewModal--tags"><span class="previewModal--tags-label">Cast:</span><span>Amber Marshall</span><span>Graham Wardle</span></div>
+      <div class="previewModal--tags"><span class="previewModal--tags-label">Genres:</span><span>Drama</span><span>Family</span></div>
+      <div class="previewModal--tags"><span class="previewModal--tags-label">This show is:</span><span>Heartfelt</span><span>Family</span></div>
     </section>
-    <img alt="" src="https://occ-0-1.nflxso.net/storyart/heartland.webp">
     <a href="/browse?jbv=81486332">Heartland</a>
   </div>
 `;
@@ -421,44 +426,56 @@ describe('live title details', () => {
     expect(falcor['81989718']).toMatchObject({ title: 'The Body', synopsis: 'A body is found on the ice.', year: '2018', source: 'cache' });
   });
 
-  it('posts GraphQL detail results and ignores playback fields', async () => {
-    const dom = page('DetailModal 76c01761-731d-48bd-8ce9-81c37e0bb3a3', 'https://www.netflix.com/browse');
+  it('asks unifiedEntities for details and does not query the missing video field', async () => {
+    const dom = page('', 'https://www.netflix.com/browse');
     const api = dom.window.MinaflixScrape;
     const query = api.rawDetailQuery(['81486332']);
+    expect(query).toContain('unifiedEntities');
     expect(query).toContain('synopsis');
+    expect(query).not.toMatch(/\bvideo\s*\(/);
     expect(query).not.toMatch(/license|manifest|playback|drm|promoVideo/i);
-    expect(JSON.stringify(api.detailModalBody('81486332', null))).not.toMatch(/authURL|license|manifest|playback|drm/i);
-    const messages = [];
-    dom.window.addEventListener('message', (event) => messages.push(event.data));
+    const calls = [];
     dom.window.fetch = async (_url, options) => {
       const body = JSON.parse(options.body);
-      if (body.query) {
-        return { ok: false, status: 400, text: async () => JSON.stringify({ errors: [{ message: 'PersistedQueryNotFound' }] }) };
-      }
+      calls.push(body);
       return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({
-          data: {
-            video: {
-              __typename: 'Show',
-              videoId: 81486332,
-              title: 'Heartland',
-              synopsis: 'Amy heals horses and the people around them.',
-              latestYear: 2007,
-              contentAdvisory: { certificationValue: 'TV-14' },
-              seasons: { totalCount: 17 },
-              genreTags: ['Drama', 'Family'],
-              cast: [{ name: 'Amber Marshall' }],
-              storyArt: { url: 'https://occ-0-1.nflxso.net/storyart/heartland.webp' },
-            },
-          },
-        }),
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({ errors: [{ message: "Validation error (FieldUndefined@[video]) : Field 'video' in type 'Query' is undefined" }] }),
       };
     };
+    const failed = await api.fetchGraphqlDetails(dom.window, ['81486332']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].query).not.toMatch(/\bvideo\s*\(/);
+    expect(failed.byId).toEqual({});
+    expect(failed.error).toMatch(/FieldUndefined|undefined/);
+  });
+
+  it('reads a unifiedEntities response', async () => {
+    const dom = page('', 'https://www.netflix.com/browse');
+    const api = dom.window.MinaflixScrape;
+    dom.window.fetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        data: {
+          unifiedEntities: [{
+            __typename: 'Show',
+            unifiedEntityId: 'Video:81486332',
+            videoId: 81486332,
+            title: 'Heartland',
+            synopsis: 'Amy heals horses and the people around them.',
+            latestYear: 2007,
+            contentAdvisory: { certificationValue: 'TV-14' },
+            seasons: { totalCount: 17 },
+            genreTags: ['Drama', 'Family'],
+            cast: [{ name: 'Amber Marshall' }],
+            storyArt: { url: 'https://occ-0-1.nflxso.net/storyart/heartland.webp' },
+          }],
+        },
+      }),
+    });
     const result = await api.fetchGraphqlDetails(dom.window, ['81486332']);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(result.path).toBe('graphql');
     expect(result.byId['81486332']).toMatchObject({
       synopsis: 'Amy heals horses and the people around them.',
       year: '2007',
@@ -467,7 +484,6 @@ describe('live title details', () => {
       genres: ['Drama', 'Family'],
       source: 'graphql',
     });
-    expect(messages.at(-1)).toMatchObject({ source: 'minaflix-sync', type: 'details', path: 'graphql' });
   });
 
   it('reads the open preview modal', () => {
@@ -481,11 +497,17 @@ describe('live title details', () => {
       maturity: 'TV-14',
       seasons: 17,
       cast: ['Amber Marshall', 'Graham Wardle'],
-      genres: ['Drama', 'Family'],
-      backdrop: 'https://occ-0-1.nflxso.net/storyart/heartland.webp',
+      genres: ['Drama', 'Family', 'Heartfelt'],
+      creators: ['Heather Conkie'],
+      backdrop: 'https://occ-0-1.nflxso.net/dnm/api/v6/hero.webp',
       mediaType: 'tv',
       source: 'modal',
     });
+    expect(meta.title).not.toMatch(/episodes|about /i);
+    expect(api.cardTitleOverDetail('The Blacklist', 'Episodes')).toBe('The Blacklist');
+    expect(api.cardTitleOverDetail('Episodes', 'About Animals')).toBe('Animals');
+    expect(api.modalMatches(dom.window.document, '81486332', 'Heartland')).toBe(true);
+    expect(api.modalMatches(dom.window.document, '70281312', 'The Blacklist')).toBe(false);
     expect(api.openTitleModal('81486332')).toBe('click');
   });
 });

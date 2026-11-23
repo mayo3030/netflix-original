@@ -65,7 +65,38 @@ export function parseCatalogFile(text: string): StoredCatalog {
     return name && titles.length ? [{ name, titles }] : [];
   });
   if (!rows.length) throw new NetflixImportError('That catalog file has no titles.');
-  return { rows };
+  return { rows: preferCardTitles(rows) };
+}
+
+function titleRank(title: string): number {
+  const text = title.trim();
+  if (!text || /^(episodes|more like this|trailers(?:\s*&\s*more)?)$/i.test(text)) return 0;
+  if (/^about\s+/i.test(text)) return 1;
+  return 2;
+}
+
+function cleanedTitle(title: string): string {
+  return title.trim().replace(/^about\s+/i, '').trim() || title.trim();
+}
+
+function preferCardTitles(rows: StoredCatalog['rows']): StoredCatalog['rows'] {
+  const best = new Map<string, { title: string; rank: number }>();
+  for (const row of rows) {
+    for (const title of row.titles) {
+      if (!title.netflixId) continue;
+      const rank = titleRank(title.title);
+      const current = best.get(title.netflixId);
+      if (!current || rank > current.rank) best.set(title.netflixId, { title: cleanedTitle(title.title), rank });
+    }
+  }
+  return rows.map((row) => ({
+    ...row,
+    titles: row.titles.map((title) => {
+      const preferred = title.netflixId ? best.get(title.netflixId) : null;
+      if (!preferred || preferred.rank === 0) return { ...title, title: cleanedTitle(title.title) };
+      return { ...title, title: preferred.title };
+    }),
+  }));
 }
 
 export function titleFromCatalog(entry: CatalogTitle): Title {
