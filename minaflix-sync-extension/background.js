@@ -285,6 +285,7 @@ async function pageCall(tabId, payload) {
     func: async (request) => {
       const api = globalThis.MinaflixScrape;
       if (!api) return null;
+      if (request.op === 'live') return api.collectLiveBrowse();
       if (request.op === 'lolomo') {
         const ctx = api.readMemberApi(globalThis.netflix?.reactContext || globalThis.netflix?.appContext);
         if (!ctx) return { rows: [] };
@@ -383,17 +384,25 @@ async function syncCatalog(port, isActive) {
     if (!job?.rows?.length) {
       send({ type: 'progress', text: 'Reading home rows…' });
       let rows = [];
+      let genres = [];
       try {
-        const lolomo = await pageCall(opened.tabId, { op: 'lolomo', from: 0, to: 25 });
-        rows = lolomo?.rows || [];
+        const live = await pageCall(opened.tabId, { op: 'live' });
+        rows = live?.rows || [];
+        genres = live?.genres || [];
       } catch {
         rows = [];
       }
       if (!rows.length) {
-        send({ type: 'progress', text: 'Home API had no rows. Reading the browse page…' });
-        const browse = await pageCall(opened.tabId, { op: 'html', url: 'https://www.netflix.com/browse' }) || { rows: [], genres: [] };
-        rows = browse.rows || [];
-        for (const genre of (browse.genres || []).slice(0, 12)) {
+        try {
+          const lolomo = await pageCall(opened.tabId, { op: 'lolomo', from: 0, to: 25 });
+          rows = lolomo?.rows || [];
+        } catch {
+          rows = [];
+        }
+      }
+      if (!rows.length) {
+        send({ type: 'progress', text: 'Reading genre pages…' });
+        for (const genre of genres.slice(0, 12)) {
           if (!isActive()) return;
           await sleep(1000);
           send({ type: 'progress', text: `Reading genre ${genre.name}…` });

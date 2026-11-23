@@ -303,6 +303,59 @@ describe('title metadata parsers', () => {
   });
 });
 
+const liveBrowse = `
+  <a data-uia="nav-series" href="/browse/genre/83"><span><span>
+    <span data-uia="navigation-item-text">Shows</span><span aria-hidden="true">Shows</span>
+  </span></span></a>
+  <a data-uia="nav-movies" href="/browse/genre/34399"><span><span>
+    <span data-uia="navigation-item-text">Movies</span><span aria-hidden="true">Movies</span>
+  </span></span></a>
+  <div class="carousel-row" aria-labelledby="row-heading" data-uia="carousel-row-section-2">
+    <h2 id="row-heading">Put the Kids to Bed &amp; Binge</h2>
+    <div data-uia="carousel-scroller">
+      <button type="button" aria-label="See previous titles" tabindex="-1" data-uia="carousel-hawkins-left-button"></button>
+      <div data-virtual-slot="0"></div>
+      <div data-virtual-slot="8">
+        <a href="/browse?jbv=80996601" aria-label="Love Is Blind" data-uia="standard-card">
+          <div data-uia="card-image-focus-host">
+            <img alt="" src="https://occ-0-2430-2433.1.nflxso.net/dnm/api/v6/example/love.webp">
+          </div>
+        </a>
+      </div>
+      <a href="/browse?jbv=81983578" aria-label="The Body" data-uia="progress-card">
+        <img alt="" src="https://occ-0-2430-2433.1.nflxso.net/dnm/api/v6/example/body.webp">
+      </a>
+    </div>
+  </div>
+`;
+
+describe('live browse carousel', () => {
+  it('reads jbv cards, artwork, and a single genre label', () => {
+    const dom = page('', 'https://www.netflix.com/browse');
+    const parsed = dom.window.MinaflixScrape.rowsFromBrowseHtml(liveBrowse);
+    expect(parsed.genres).toEqual([{ id: '83', name: 'Shows' }, { id: '34399', name: 'Movies' }]);
+    expect(parsed.rows[0].name).toBe('Put the Kids to Bed & Binge');
+    expect(parsed.rows[0].titles.map((item) => item.netflixId)).toEqual(['80996601', '81983578']);
+    expect(parsed.rows[0].titles[0]).toMatchObject({
+      title: 'Love Is Blind',
+      image: 'https://occ-0-2430-2433.1.nflxso.net/dnm/api/v6/example/love.webp',
+    });
+  });
+
+  it('reads genre entities from the inline GraphQL cache', () => {
+    const dom = page('', 'https://www.netflix.com/browse');
+    const parsed = dom.window.MinaflixScrape.rowsFromGraphqlCache({
+      data: {
+        'Genre:{"genreId":83}': { unifiedEntityId: 'Collection:83', title: 'Shows', videoId: 80996601, name: 'Love Is Blind' },
+        'Genre:{"genreId":34399}': { unifiedEntityId: 'Collection:34399', title: 'Movies' },
+      },
+    });
+    expect(parsed.genres.map((genre) => genre.id)).toEqual(['83', '34399']);
+    expect(parsed.genres[0].name).toBe('Shows');
+    expect(parsed.rows[0].titles[0].netflixId).toBe('80996601');
+  });
+});
+
 describe('catalog rows', () => {
   it('reads lolomo rows and video references', () => {
     const dom = page('', 'https://www.netflix.com/browse');

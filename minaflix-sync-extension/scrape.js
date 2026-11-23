@@ -540,43 +540,185 @@
     return rows;
   }
 
-  function linksIn(rootNode) {
+  function idFromCardHref(href) {
+    const jbv = /[?&]jbv=(\d{1,12})(?:&|$)/.exec(String(href || ''));
+    if (jbv) return jbv[1];
+    return netflixIdFromHref(href);
+  }
+
+  function cardImage(anchor) {
+    const image = anchor.querySelector('[data-uia="card-image-focus-host"] img') || anchor.querySelector('img');
+    const src = absoluteHttps(image?.getAttribute('src') || '');
+    return /nflxso\.net|nflximg/i.test(src) ? src : null;
+  }
+
+  function titlesFromRoot(rootNode) {
     const titles = [];
     const seen = new Set();
     if (!rootNode) return titles;
-    for (const anchor of rootNode.querySelectorAll('a[href*="/title/"], a[href*="/watch/"]')) {
-      const netflixId = netflixIdFromHref(anchor.getAttribute('href'));
-      const title = titleFromAnchor(anchor);
-      if (!netflixId || seen.has(netflixId)) continue;
+    const cards = rootNode.querySelectorAll('a[data-uia$="-card"][href*="jbv="], a[href*="/title/"], a[href*="/watch/"], a[href*="jbv="]');
+    for (const anchor of cards) {
+      const netflixId = idFromCardHref(anchor.getAttribute('href'));
+      const title = clean(anchor.getAttribute('aria-label')) || titleFromAnchor(anchor);
+      if (!netflixId || !title || seen.has(netflixId)) continue;
       seen.add(netflixId);
-      titles.push({ netflixId, title });
+      titles.push({ netflixId, title, image: cardImage(anchor) });
     }
     return titles;
   }
 
-  function rowsFromBrowseHtml(html) {
-    const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+  function genreLinks(doc) {
+    const genres = [];
+    const seen = new Set();
+    for (const anchor of doc.querySelectorAll('a[href^="/browse/genre/"], a[href*="/browse/genre/"]')) {
+      const match = /\/browse\/genre\/(\d+)/.exec(anchor.getAttribute('href') || '');
+      if (!match || seen.has(match[1])) continue;
+      seen.add(match[1]);
+      const label = anchor.querySelector('[data-uia="navigation-item-text"]');
+      const visible = clean(label?.textContent);
+      const raw = clean(anchor.textContent);
+      const doubled = raw.length > 1 && raw.length % 2 === 0 && raw.slice(0, raw.length / 2) === raw.slice(raw.length / 2)
+        ? raw.slice(0, raw.length / 2)
+        : raw;
+      const name = visible || clean(anchor.getAttribute('aria-label')) || doubled;
+      if (!name) continue;
+      genres.push({ id: match[1], name });
+    }
+    return genres;
+  }
+
+  function rowsFromBrowseDocument(doc) {
     const rows = [];
-    const headings = [...doc.querySelectorAll('h2, [data-uia*="row-title"]')];
-    for (const heading of headings) {
-      const name = clean(heading.textContent);
-      const container = heading.closest('section, [data-list-context], .lolomoRow, .row') || heading.parentElement;
-      const titles = linksIn(container);
+    const carousels = [...doc.querySelectorAll('[data-uia^="carousel-row-section-"]')];
+    for (const carousel of carousels) {
+      const headingId = carousel.getAttribute('aria-labelledby');
+      const heading = (headingId && doc.getElementById(headingId)) || carousel.querySelector('h2[id$="-heading"], h2');
+      const name = clean(heading?.textContent);
+      const titles = titlesFromRoot(carousel);
       if (name && titles.length) rows.push({ name, titles });
     }
     if (!rows.length) {
-      const titles = linksIn(doc.body || doc);
+      const headings = [...doc.querySelectorAll('h2, [data-uia*="row-title"]')];
+      for (const heading of headings) {
+        const name = clean(heading.textContent);
+        const container = heading.closest('section, [data-list-context], .lolomoRow, [data-uia^="carousel-row-section-"]') || heading.parentElement;
+        const titles = titlesFromRoot(container);
+        if (name && titles.length) rows.push({ name, titles });
+      }
+    }
+    if (!rows.length) {
+      const titles = titlesFromRoot(doc.body || doc);
       if (titles.length) rows.push({ name: 'Browse', titles });
     }
+    return { rows, genres: genreLinks(doc) };
+  }
+
+  function rowsFromBrowseHtml(html) {
+    const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+    return rowsFromBrowseDocument(doc);
+  }
+
+  function parseEmbeddedJson(raw) {
+    if (!raw) return null;
+    if (typeof raw === 'object') return raw;
+    const text = String(raw).replace(/\\'/g, "'");
+    try { return JSON.parse(text); } catch { /* try one more unescape */ }
+    try { return JSON.parse(text.replace(/\\"/g, '"')); } catch { return null; }
+  }
+
+  function graphqlCacheFromHtml(html) {
+    const source = String(html || '');
+    const patterns = [
+      /models\.graphql\s*=\s*JSON\.parse\('([\s\S]*?)'\)/,
+      /"graphql"\s*:\s*"((?:\\.|[^"\\])*)"/,
+    ];
+    for (const pattern of patterns) {
+      const match = pattern.exec(source);
+      if (!match) continue;
+      const parsed = parseEmbeddedJson(match[1]);
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+
+  function graphqlCacheFromWindow(win) {
+    const raw = win?.netflix?.reactContext?.models?.graphql || win?.netflix?.appContext?.models?.graphql;
+    return parseEmbeddedJson(raw);
+  }
+
+  function videoIdsIn(value, found) {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) {
+      value.forEach((item) => videoIdsIn(item, found));
+      return;
+    }
+    const unified = String(value.unifiedEntityId || '');
+    const unifiedId = /^(?:Video|Movie|Show):(\d{1,12})$/.exec(unified);
+    const direct = value.videoId || value.jbv || (unifiedId ? unifiedId[1] : null);
+    if (/^\d{1,12}$/.test(String(direct || ''))) {
+      found.push({ netflixId: String(direct), title: asText(value.title) || asText(value.name) });
+    }
+    Object.values(value).forEach((item) => videoIdsIn(item, found));
+  }
+
+  function rowsFromGraphqlCache(cache) {
+    const data = cache?.data || cache;
+    if (!data || typeof data !== 'object') return { rows: [], genres: [] };
     const genres = [];
+    const rows = [];
+    const loose = [];
     const seenGenres = new Set();
-    for (const anchor of doc.querySelectorAll('a[href*="/browse/genre/"]')) {
-      const match = /\/browse\/genre\/(\d+)/.exec(anchor.getAttribute('href') || '');
-      if (!match || seenGenres.has(match[1])) continue;
-      seenGenres.add(match[1]);
-      genres.push({ id: match[1], name: clean(anchor.textContent) || `Genre ${match[1]}` });
+    for (const [key, value] of Object.entries(data)) {
+      const genreMatch = /genreId"\s*:\s*"?(\d+)/.exec(key);
+      const name = asText(value?.title) || asText(value?.name);
+      if (genreMatch && !seenGenres.has(genreMatch[1])) {
+        seenGenres.add(genreMatch[1]);
+        genres.push({ id: genreMatch[1], name: name || `Genre ${genreMatch[1]}` });
+        const titles = [];
+        videoIdsIn(value, titles);
+        const unique = [];
+        const seen = new Set();
+        for (const title of titles) {
+          if (seen.has(title.netflixId) || title.netflixId === genreMatch[1]) continue;
+          seen.add(title.netflixId);
+          unique.push(title);
+        }
+        if (name && unique.length) rows.push({ name, titles: unique });
+      } else {
+        videoIdsIn(value, loose);
+      }
+    }
+    if (!rows.length && loose.length) {
+      const seen = new Set();
+      const titles = [];
+      for (const title of loose) {
+        if (!title.title || seen.has(title.netflixId)) continue;
+        seen.add(title.netflixId);
+        titles.push(title);
+      }
+      if (titles.length) rows.push({ name: 'Catalog', titles });
     }
     return { rows, genres };
+  }
+
+  async function collectLiveBrowse() {
+    const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    for (let step = 0; step < 5; step += 1) {
+      window.scrollBy(0, Math.max(500, window.innerHeight * 0.8));
+      await pause(350);
+      const buttons = [...document.querySelectorAll('[data-uia="carousel-hawkins-right-button"]')]
+        .filter((button) => !button.disabled && button.getAttribute('tabindex') !== '-1');
+      for (const button of buttons.slice(0, 8)) {
+        button.click();
+        await pause(200);
+      }
+    }
+    const dom = rowsFromBrowseDocument(document);
+    const cached = rowsFromGraphqlCache(graphqlCacheFromWindow(globalThis) || graphqlCacheFromHtml(document.documentElement.innerHTML));
+    return {
+      rows: dom.rows.length ? dom.rows : cached.rows,
+      genres: dom.genres.length ? dom.genres : cached.genres,
+    };
   }
 
   async function fetchMemberMetadata(win, ids) {
@@ -668,6 +810,9 @@
     attachDetails,
     rowsFromLolomo,
     rowsFromBrowseHtml,
+    rowsFromGraphqlCache,
+    graphqlCacheFromHtml,
     catalogPaths,
+    collectLiveBrowse,
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);
