@@ -15,7 +15,7 @@ export type NetflixEntry = {
   runtimeMinutes?: number | null;
   seasons?: number | null;
   mediaType?: 'movie' | 'tv' | null;
-  detailSource?: 'api' | 'page' | null;
+  detailSource?: 'api' | 'page' | 'cache' | 'graphql' | 'modal' | null;
 };
 
 export type NetflixLists = {
@@ -214,7 +214,7 @@ function detailsFromRecord(record: {
   if (typeof record.seasons === 'number') details.seasons = record.seasons;
   if (record.mediaType === 'movie' || record.mediaType === 'tv') details.mediaType = record.mediaType;
   const source = record.detailSource || record.source;
-  if (source === 'api' || source === 'page') details.detailSource = source;
+  if (source === 'api' || source === 'page' || source === 'cache' || source === 'graphql' || source === 'modal') details.detailSource = source;
   return details;
 }
 

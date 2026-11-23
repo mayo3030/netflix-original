@@ -2,7 +2,7 @@ import { useCatalog } from '../context/CatalogProvider';
 import { useLanguage } from '../i18n/LanguageProvider';
 import { displayText, genreChips } from '../text';
 import type { Title } from '../types';
-import { netflixWatchUrl } from '../import/catalog';
+import { heroKickerKey, netflixWatchUrl } from '../import/catalog';
 import { MetaBits } from './MetaBits';
 import { Backdrop } from './Poster';
 
@@ -27,7 +27,7 @@ export function Hero({
         <p className="kicker">
           {t('heroKicker')}
           <span aria-hidden="true"> · </span>
-          {source === 'mock' ? t('demoCatalog') : t('liveData')}
+          {t(heroKickerKey(title, source))}
         </p>
         <h1>{name}</h1>
         <MetaBits title={title} />

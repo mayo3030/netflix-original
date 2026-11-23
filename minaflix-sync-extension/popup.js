@@ -11,6 +11,7 @@ function pushStatus(text) {
 function startExport(mode) {
   button.disabled = true;
   catalog.disabled = true;
+  if (cap) cap.disabled = true;
   lines.length = 0;
   summary.textContent = '';
   pushStatus(mode === 'catalog' ? 'Starting catalog sync…' : 'Starting…');
@@ -26,12 +27,14 @@ function startExport(mode) {
       summary.textContent = message.text || 'Exported 0 watched, 0 My List';
       button.disabled = false;
       catalog.disabled = false;
+      if (cap) cap.disabled = false;
       port.disconnect();
     }
     if (message?.type === 'error') {
       pushStatus(message.text || 'Export failed.');
       button.disabled = false;
       catalog.disabled = false;
+      if (cap) cap.disabled = false;
       port.disconnect();
     }
   });
@@ -40,11 +43,14 @@ function startExport(mode) {
       status.textContent = 'Paused. Open the extension again to resume a catalog sync.';
       button.disabled = false;
       catalog.disabled = false;
+      if (cap) cap.disabled = false;
     }
   });
-  port.postMessage({ type: 'start', mode });
+  const detailCap = mode === 'catalog' && cap && cap.value.trim() !== '' ? Number(cap.value) : null;
+  port.postMessage({ type: 'start', mode, detailCap });
 }
 
 const catalog = document.getElementById('catalog');
+const cap = document.getElementById('cap');
 button.addEventListener('click', () => startExport('lists'));
 catalog.addEventListener('click', () => startExport('catalog'));

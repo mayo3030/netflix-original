@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseCatalogFile, titleFromCatalog } from './catalog';
+import { catalogRows, heroKickerKey, parseCatalogFile, titleFromCatalog } from './catalog';
 
 describe('parseCatalogFile', () => {
   it('reads a catalog export into renderable titles', () => {
@@ -33,5 +33,32 @@ describe('parseCatalogFile', () => {
     expect(title.seasons).toBe(17);
     expect(title.cast[0]?.name).toBe('Amber Marshall');
     expect(title.netflixId).toBe('81486332');
+  });
+
+  it('features an imported Netflix title on the hero', () => {
+    const catalog = parseCatalogFile(JSON.stringify({
+      kind: 'catalog',
+      rows: [
+        { name: 'Continue Watching', titles: [{ title: 'Untitled card', netflixId: '100', image: 'https://occ-0-1.nflxso.net/card.webp' }] },
+        {
+          name: 'Drama',
+          titles: [{
+            title: 'Heartland',
+            netflixId: '81486332',
+            synopsis: 'Amy heals horses and the people around them.',
+            image: 'https://occ-0-1.nflxso.net/boxart.jpg',
+            backdrop: 'https://occ-0-1.nflxso.net/story.jpg',
+            source: 'graphql',
+          }],
+        },
+      ],
+    }));
+    const { hero, rows } = catalogRows(catalog);
+    expect(hero.title).toBe('Heartland');
+    expect(hero.netflixId).toBe('81486332');
+    expect(hero.overview).toContain('Amy heals horses');
+    expect(rows[0]?.titles[0]?.title).toBe('Untitled card');
+    expect(heroKickerKey(hero, 'mock')).toBe('yourCatalog');
+    expect(heroKickerKey({ netflixId: null }, 'mock')).toBe('demoCatalog');
   });
 });

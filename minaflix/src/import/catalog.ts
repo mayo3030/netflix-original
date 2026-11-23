@@ -37,7 +37,9 @@ function entryFrom(value: unknown): CatalogTitle | null {
     runtimeMinutes: typeof record.runtimeMinutes === 'number' ? record.runtimeMinutes : null,
     seasons: typeof record.seasons === 'number' ? record.seasons : null,
     mediaType: record.mediaType === 'tv' || record.mediaType === 'movie' ? record.mediaType : null,
-    detailSource: record.source === 'api' || record.source === 'page' ? record.source : record.detailSource ?? null,
+    detailSource: record.source === 'api' || record.source === 'page' || record.source === 'cache' || record.source === 'graphql' || record.source === 'modal'
+      ? record.source
+      : record.detailSource ?? null,
   };
 }
 
@@ -143,6 +145,15 @@ export function clearStoredCatalog(): void {
   localStorage.removeItem(CATALOG_KEY);
 }
 
+function featureScore(title: Title): number {
+  return (title.netflixId ? 4 : 0) + (title.backdropUrl ? 2 : 0) + (title.posterUrl ? 1 : 0) + (title.overview ? 2 : 0);
+}
+
+export function heroKickerKey(title: { netflixId?: string | null }, source: 'mock' | 'tmdb'): 'yourCatalog' | 'demoCatalog' | 'liveData' {
+  if (title.netflixId) return 'yourCatalog';
+  return source === 'mock' ? 'demoCatalog' : 'liveData';
+}
+
 export function catalogRows(stored: StoredCatalog): { hero: Title; rows: CatalogRow[] } {
   const rows = stored.rows.map((row, index) => ({
     id: `netflix-row-${index}`,
@@ -150,7 +161,11 @@ export function catalogRows(stored: StoredCatalog): { hero: Title; rows: Catalog
     titleAr: row.name,
     titles: row.titles.map(titleFromCatalog),
   }));
-  const hero = rows[0]?.titles[0];
+  const titles = rows.flatMap((row) => row.titles);
+  const hero = titles.reduce<Title | null>((best, title) => {
+    if (!best || featureScore(title) > featureScore(best)) return title;
+    return best;
+  }, null);
   if (!hero) throw new NetflixImportError('That catalog file has no titles.');
   return { hero, rows };
 }

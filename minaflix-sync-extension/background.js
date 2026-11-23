@@ -162,7 +162,7 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onMessage.addListener((message) => {
     if (message?.type !== 'start') return;
     const run = message.mode === 'catalog' ? syncCatalog : exportAccount;
-    void run(port, () => active);
+    void run(port, () => active, message);
   });
 });
 
@@ -305,6 +305,10 @@ async function pageCall(tabId, payload) {
         return api.rowsFromBrowseHtml(await response.text());
       }
       if (request.op === 'details') return api.fetchMemberMetadata(globalThis, request.ids);
+      if (request.op === 'caches') return api.readLiveCaches(globalThis, request.ids);
+      if (request.op === 'graphql') return api.fetchGraphqlDetails(globalThis, request.ids);
+      if (request.op === 'modal') return api.readLiveModal(request.id);
+      if (request.op === 'modal-read') return api.readOpenModal(request.id);
       return null;
     },
   });
@@ -327,7 +331,7 @@ function catalogTitle(item, meta) {
     creators: meta?.creators || [],
     directors: meta?.directors || [],
     mediaType: meta?.mediaType || null,
-    image: meta?.image || item.image || null,
+    image: item.image || meta?.image || null,
     backdrop: meta?.backdrop || null,
     source: meta?.source || null,
   };
@@ -373,7 +377,184 @@ async function downloadCatalog(rows, summary, errors) {
   return files.length;
 }
 
-async function syncCatalog(port, isActive) {
+function parseCap(value) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return null;
+  return Math.min(5000, Math.floor(number));
+}
+
+function prepareJob(job, message) {
+  job.details = job.details || {};
+  job.pending = Array.isArray(job.pending) ? job.pending : [];
+  job.forModal = Array.isArray(job.forModal) ? job.forModal : [];
+  job.paths = {
+    cache: job.paths?.cache || 0,
+    api: job.paths?.api || 0,
+    graphql: job.paths?.graphql || 0,
+    modal: job.paths?.modal || 0,
+  };
+  job.errors = Array.isArray(job.errors) ? job.errors : [];
+  job.detailAttempts = job.detailAttempts || 0;
+  job.detailCap = parseCap(message?.detailCap);
+  job.graphqlStopped = Boolean(job.graphqlStopped);
+  return job;
+}
+
+function rememberDetail(job, id, meta) {
+  if (!id || !meta || job.details[id]) return;
+  job.details[id] = meta;
+  const path = meta.source === 'api' || meta.source === 'graphql' || meta.source === 'modal' || meta.source === 'cache' ? meta.source : 'cache';
+  job.paths[path] += 1;
+}
+
+function pathSummary(job) {
+  const paths = job.paths || {};
+  return `cache ${paths.cache || 0}, api ${paths.api || 0}, graphql ${paths.graphql || 0}, modal ${paths.modal || 0}`;
+}
+
+function takePending(job, count) {
+  if (typeof job.detailCap === 'number' && job.detailAttempts >= job.detailCap) return [];
+  const room = typeof job.detailCap === 'number' ? job.detailCap - job.detailAttempts : count;
+  const ids = job.pending.splice(0, Math.min(count, Math.max(0, room)));
+  job.detailAttempts += ids.length;
+  return ids;
+}
+
+function restorePending(job, ids) {
+  if (!ids.length) return;
+  job.pending = [...ids, ...job.pending];
+  job.detailAttempts = Math.max(0, job.detailAttempts - ids.length);
+}
+
+async function applyCachedDetails(tabId, job, send) {
+  const result = await pageCall(tabId, { op: 'caches', ids: job.pending });
+  const byId = result?.byId || {};
+  let added = 0;
+  job.pending = job.pending.filter((id) => {
+    if (job.details[id]) return false;
+    if (!byId[id]) return true;
+    const before = job.paths.cache;
+    rememberDetail(job, id, byId[id]);
+    if (job.paths.cache > before) added += 1;
+    return false;
+  });
+  if (added) send({ type: 'progress', text: `Details via cache: ${added}. ${job.pending.length} left.` });
+}
+
+async function applyApiDetails(tabId, job, send) {
+  if (!job.pending.length) return;
+  const ids = job.pending.slice(0, 40);
+  let found = {};
+  try {
+    found = await pageCall(tabId, { op: 'details', ids }) || {};
+  } catch (error) {
+    job.errors.push({ section: 'details', path: 'api', message: error instanceof Error ? error.message : 'member API request failed' });
+    send({ type: 'progress', text: 'Member API request failed. Trying the live GraphQL client.' });
+    return;
+  }
+  let added = 0;
+  job.pending = job.pending.filter((id) => {
+    if (!found[id]) return true;
+    const before = job.paths.api;
+    rememberDetail(job, id, found[id]);
+    if (job.paths.api > before) added += 1;
+    return false;
+  });
+  send({ type: 'progress', text: added ? `Details via member API: ${added}.` : 'Member API had no title details.' });
+}
+
+async function applyGraphqlDetails(tabId, job, send, isActive) {
+  if (job.graphqlStopped) return;
+  while (isActive() && job.pending.length) {
+    const ids = takePending(job, 20);
+    if (!ids.length) return;
+    send({ type: 'progress', text: `GraphQL details for ${ids.length} titles…` });
+    let result = null;
+    try {
+      result = await pageCall(tabId, { op: 'graphql', ids });
+    } catch (error) {
+      result = { byId: {}, error: error instanceof Error ? error.message : 'graphql request failed' };
+    }
+    const byId = result?.byId || {};
+    const missed = [];
+    for (const id of ids) {
+      if (byId[id]) rememberDetail(job, id, byId[id]);
+      else missed.push(id);
+    }
+    if (!Object.keys(byId).length) {
+      restorePending(job, missed);
+      job.graphqlStopped = true;
+      const message = result?.error || 'graphql returned no details';
+      job.errors.push({ section: 'details', path: 'graphql', message });
+      send({ type: 'progress', text: `GraphQL failed: ${message} Opening the live detail modal instead.` });
+      return;
+    }
+    job.forModal.push(...missed);
+    send({ type: 'progress', text: `Details via graphql: ${job.paths.graphql}. ${job.pending.length + job.forModal.length} left.` });
+    await writeCatalogJob(job);
+    if (job.pending.length) await sleep(1000);
+  }
+}
+
+async function readModalDetail(tabId, id) {
+  let result = null;
+  try {
+    result = await pageCall(tabId, { op: 'modal', id });
+  } catch (error) {
+    result = { error: error instanceof Error ? error.message : 'modal reader failed' };
+  }
+  if (result?.meta) return result;
+  try {
+    await chrome.tabs.update(tabId, { url: `https://www.netflix.com/browse?jbv=${id}`, active: true });
+    await navigate(tabId, (url) => String(url).includes(`jbv=${id}`) || String(url).includes('/browse'));
+    await sleep(800);
+    const opened = await pageCall(tabId, { op: 'modal-read', id });
+    return opened?.meta ? opened : { error: opened?.error || result?.error || 'preview modal was not readable after navigation' };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : 'modal navigation failed' };
+  }
+}
+
+async function applyModalDetails(tabId, job, send, isActive) {
+  let streak = 0;
+  while (isActive()) {
+    const fromGraphqlMiss = job.forModal.length > 0;
+    if (!fromGraphqlMiss && typeof job.detailCap === 'number' && job.detailAttempts >= job.detailCap) {
+      if (job.pending.length) send({ type: 'progress', text: `Detail limit ${job.detailCap} reached. Remaining titles keep their card images.` });
+      job.pending = [];
+      break;
+    }
+    const list = fromGraphqlMiss ? job.forModal : job.pending;
+    if (!list.length) break;
+    const id = list.shift();
+    if (!fromGraphqlMiss) job.detailAttempts += 1;
+    send({ type: 'progress', text: `Modal for ${id}. ${pathSummary(job)}. ${list.length} left.` });
+    const result = await readModalDetail(tabId, id);
+    if (result?.meta) {
+      rememberDetail(job, id, result.meta);
+      streak = 0;
+      send({ type: 'progress', text: `Details via modal (${result.via || 'live'}): ${result.meta.title || id}.` });
+    } else {
+      streak += 1;
+      const message = result?.error || 'preview modal had no details';
+      job.errors.push({ section: 'details', id, path: 'modal', message });
+      send({ type: 'progress', text: `Modal ${id}: ${message}` });
+      if (streak >= 2 && !job.paths.modal) {
+        const stop = 'Stopped modal lookups after 2 titles opened no details. Card images stay in the export.';
+        job.errors.push({ section: 'details', path: 'modal', message: stop });
+        send({ type: 'progress', text: stop });
+        job.pending = [];
+        job.forModal = [];
+        break;
+      }
+    }
+    await writeCatalogJob(job);
+    if (job.pending.length || job.forModal.length) await sleep(1500);
+  }
+}
+
+async function syncCatalog(port, isActive, message) {
   const send = (payload) => {
     if (isActive()) port.postMessage(payload);
   };
@@ -415,59 +596,27 @@ async function syncCatalog(port, isActive) {
         }
       }
       const pending = [...new Set(rows.flatMap((row) => row.titles.map((item) => item.netflixId)))];
-      job = { rows, details: {}, pending };
+      job = prepareJob({ rows, details: {}, pending }, message);
       await writeCatalogJob(job);
     } else {
-      send({ type: 'progress', text: `Resuming catalog sync. ${job.pending.length} titles left.` });
+      job = prepareJob(job, message);
+      send({ type: 'progress', text: `Resuming catalog sync. ${job.pending.length + job.forModal.length} titles left.` });
     }
-    const detailErrors = [];
-    let sampledShell = false;
-    while (job.pending.length && isActive() && !sampledShell) {
-      const batch = job.pending.slice(0, 30);
-      send({ type: 'progress', text: `Details ${Object.keys(job.details).length} done, ${job.pending.length} left…` });
-      let found = {};
+    if (isActive()) {
       try {
-        found = await pageCall(opened.tabId, { op: 'details', ids: batch }) || {};
+        await applyCachedDetails(opened.tabId, job, send);
       } catch (error) {
-        detailErrors.push({ section: 'details', message: error instanceof Error ? error.message : 'member API request failed' });
-        found = {};
+        job.errors.push({ section: 'details', path: 'cache', message: error instanceof Error ? error.message : 'cache read failed' });
       }
-      const still = [];
-      for (const id of batch) {
-        if (found[id]) job.details[id] = found[id];
-        else still.push(id);
+      if (job.detailCap !== 0) {
+        await applyApiDetails(opened.tabId, job, send);
+        if (isActive()) await applyGraphqlDetails(opened.tabId, job, send, isActive);
+        if (isActive()) await applyModalDetails(opened.tabId, job, send, isActive);
+      } else {
+        send({ type: 'progress', text: 'Detail limit 0. Saving card images without more lookups.' });
       }
-      if (!Object.keys(found).length && still.length) {
-        const sample = still.slice(0, 2);
-        for (const id of sample) {
-          if (!isActive()) return;
-          try {
-            const [result] = await chrome.scripting.executeScript({
-              target: { tabId: opened.tabId },
-              world: 'MAIN',
-              args: [id],
-              func: (titleId) => globalThis.MinaflixScrape.fetchPageMetadata(titleId),
-            });
-            const page = result?.result;
-            if (page?.meta) job.details[id] = page.meta;
-            else detailErrors.push({ section: 'details', id, message: page?.error || 'title page returned no metadata' });
-          } catch (error) {
-            detailErrors.push({ section: 'details', id, message: error instanceof Error ? error.message : 'title page fetch failed' });
-          }
-          await sleep(1000);
-        }
-        const shell = detailErrors.some((item) => /SPA shell|redirected to login/.test(item.message || ''));
-        if (shell && !Object.keys(job.details).length) {
-          sampledShell = true;
-          detailErrors.push({ section: 'details', message: `Stopped title-page lookups after ${sample.length} samples failed the same way. Card images from the browse page are still saved.` });
-          send({ type: 'progress', text: detailErrors[detailErrors.length - 1].message });
-        }
-      }
-      job.pending = sampledShell ? [] : job.pending.slice(batch.length);
       await writeCatalogJob(job);
-      if (job.pending.length) await sleep(1000);
     }
-    job.errors = detailErrors;
     if (!isActive()) {
       send({ type: 'progress', text: 'Paused. Open the extension again to resume.' });
       return;
@@ -479,7 +628,8 @@ async function syncCatalog(port, isActive) {
     const count = rows.reduce((sum, row) => sum + row.titles.length, 0);
     const images = rows.reduce((sum, row) => sum + row.titles.filter((item) => item.image).length, 0);
     const detailed = Object.keys(job.details).length;
-    const summary = `Exported ${count} catalog titles in ${rows.length} rows. Images ${images}. Details ${detailed}.`;
+    const failure = detailed === 0 ? (job.errors || []).find((item) => item.message) : null;
+    const summary = `Exported ${count} catalog titles in ${rows.length} rows. Images ${images}. Details ${detailed} (${pathSummary(job)}).${failure ? ` ${failure.message}` : ''}`;
     send({ type: 'summary', text: summary });
     await sleep(400);
     const parts = await downloadCatalog(rows, summary, job.errors || []);

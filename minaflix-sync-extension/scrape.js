@@ -329,7 +329,7 @@
     const value = unwrap(node);
     if (typeof value === 'string') return clean(value);
     if (!value || typeof value !== 'object') return '';
-    return clean(asText(value.rating?.value) || asText(value.rating) || asText(value.value) || asText(value.certification) || asText(value.boardRating));
+    return clean(asText(value.certificationValue) || asText(value.rating?.value) || asText(value.rating) || asText(value.value) || asText(value.certification) || asText(value.boardRating));
   }
 
   function metadataFromVideo(video) {
@@ -496,7 +496,7 @@
   }
 
   function useful(meta) {
-    return Boolean(meta && (meta.synopsis || meta.image || meta.cast?.length || meta.genres?.length || meta.year));
+    return Boolean(meta && (meta.synopsis || meta.image || meta.backdrop || meta.cast?.length || meta.genres?.length || meta.year || meta.maturity || meta.seasons || meta.runtimeMinutes));
   }
 
   function catalogPaths(rowFrom, rowTo, itemTo) {
@@ -859,6 +859,404 @@
     });
   }
 
+  const DETAIL_MODAL_QUERY_ID = '76c01761-731d-48bd-8ce9-81c37e0bb3a3';
+  const GRAPHQL_URL = 'https://web.prod.cloud.netflix.com/graphql';
+
+  function videoIdOf(node) {
+    if (!node || typeof node !== 'object') return '';
+    const unified = /^(?:Video|Movie|Show):(\d{1,12})$/.exec(String(node.unifiedEntityId || ''));
+    const direct = node.videoId ?? node.videoID ?? (unified ? unified[1] : null);
+    const text = String(direct ?? '');
+    return /^\d{1,12}$/.test(text) ? text : '';
+  }
+
+  function idFromCacheKey(key) {
+    const plain = /^(?:Video|Movie|Show|Episode):(\d{1,12})$/.exec(String(key || ''));
+    if (plain) return plain[1];
+    const embedded = /videoId["']?\s*[:=]\s*["']?(\d{1,12})/.exec(String(key || ''));
+    return embedded ? embedded[1] : '';
+  }
+
+  function peopleFrom(entity, keys) {
+    const names = [];
+    for (const key of keys) {
+      const value = entity?.[key];
+      const list = Array.isArray(value) ? value : (Array.isArray(value?.edges) ? value.edges.map((edge) => edge?.node || edge) : null);
+      if (!list) continue;
+      for (const item of list) {
+        const name = clean(typeof item === 'string' ? item : (item?.name || item?.displayName || ''));
+        if (name) names.push(name);
+      }
+    }
+    return [...new Set(names)].slice(0, 16);
+  }
+
+  function genreNames(entity) {
+    const tags = entity?.genreTags;
+    if (Array.isArray(tags) && tags.every((tag) => typeof tag === 'string')) return tags.map((tag) => clean(tag)).filter(Boolean).slice(0, 12);
+    return peopleFrom(entity, ['genreTags', 'genres']).slice(0, 12);
+  }
+
+  function yearFromEntity(entity) {
+    const value = asNumber(entity.latestYear) ?? asNumber(entity.releaseYear) ?? asNumber(entity.year);
+    return value && value > 1900 && value < 2100 ? String(value) : '';
+  }
+
+  function runtimeFromText(text) {
+    const value = String(text || '');
+    if (/season/i.test(value)) return null;
+    const hours = /(\d+)\s*h(?:ours?)?(?:\s|$)/i.exec(value);
+    const minutes = /(\d+)\s*m(?:in(?:utes?)?)?(?:\s|$)/i.exec(value);
+    if (!hours && !minutes) return null;
+    const total = (hours ? Number(hours[1]) * 60 : 0) + (minutes ? Number(minutes[1]) : 0);
+    return total > 0 ? total : null;
+  }
+
+  function seasonsFromText(text) {
+    const match = /(\d+)\s+Seasons?/i.exec(String(text || ''));
+    return match ? Number(match[1]) : null;
+  }
+
+  function runtimeFromEntity(entity) {
+    const seconds = asNumber(entity.runtimeSec);
+    if (seconds && seconds > 60) return Math.round(seconds / 60);
+    const raw = asNumber(entity.runtime);
+    if (raw == null) return runtimeFromText(asText(entity.displayRuntime));
+    return raw > 300 ? Math.round(raw / 60) : raw;
+  }
+
+  function seasonsFromEntity(entity) {
+    const total = asNumber(entity.seasons?.totalCount) ?? asNumber(entity.seasonCount) ?? asNumber(entity.numSeasons);
+    if (total && total > 0 && total < 200) return total;
+    return seasonsFromText(asText(entity.numSeasonsLabel));
+  }
+
+  function maturityFromEntity(entity) {
+    return maturityText(entity.contentAdvisory) || maturityText(entity.maturity) || asText(entity.certificationRating);
+  }
+
+  function artworkFrom(entity) {
+    const urls = [];
+    const visit = (node, key) => {
+      if (!node || urls.length > 8) return;
+      if (typeof node === 'string') {
+        const url = artworkUrl(node);
+        if (url) urls.push({ key, url });
+        return;
+      }
+      if (typeof node === 'object') {
+        if (node.url) visit(node.url, key);
+        if (Array.isArray(node)) node.slice(0, 4).forEach((item) => visit(item, key));
+      }
+    };
+    for (const key of ['storyArt', 'storyarts', 'boxArt', 'boxart', 'boxarts', 'artwork']) visit(entity[key], key);
+    const backdrop = urls.find((item) => /story|backdrop/i.test(item.key) || /storyart|backdrop/i.test(item.url))?.url || null;
+    const image = urls.find((item) => item.url !== backdrop)?.url || null;
+    return { image, backdrop };
+  }
+
+  function metadataFromEntity(entity, source) {
+    if (!entity || typeof entity !== 'object') return null;
+    const art = artworkFrom(entity);
+    const seasons = seasonsFromEntity(entity);
+    const runtimeMinutes = runtimeFromEntity(entity);
+    const typeName = String(entity.__typename || entity.type || '').toLowerCase();
+    const mediaType = /show|series|season/.test(typeName) || seasons ? 'tv' : (/movie/.test(typeName) || runtimeMinutes ? 'movie' : null);
+    return {
+      title: asText(entity.title) || asText(entity.name),
+      synopsis: asText(entity.synopsis) || asText(entity.contextualSynopsis?.text) || asText(entity.narrativeText) || asText(entity.shortSynopsis),
+      year: yearFromEntity(entity),
+      maturity: maturityFromEntity(entity),
+      runtimeMinutes,
+      seasons,
+      genres: genreNames(entity),
+      cast: peopleFrom(entity, ['cast', 'actors']),
+      creators: peopleFrom(entity, ['creators']),
+      directors: peopleFrom(entity, ['directors']),
+      mediaType,
+      image: art.image,
+      backdrop: art.backdrop,
+      source,
+    };
+  }
+
+  function rememberEntity(byId, id, node, source) {
+    if (!id || byId[id]) return;
+    const meta = metadataFromEntity({ ...node, videoId: node.videoId || Number(id) }, source);
+    if (useful(meta)) byId[id] = meta;
+  }
+
+  function detailsFromGraphqlCache(cache, ids) {
+    const wanted = Array.isArray(ids) && ids.length ? new Set(ids.map(String)) : null;
+    const byId = {};
+    const data = cache?.data || cache;
+    if (!data || typeof data !== 'object') return byId;
+    const visit = (node, depth, keyHint) => {
+      if (!node || typeof node !== 'object' || depth > 5) return;
+      const id = videoIdOf(node) || idFromCacheKey(keyHint);
+      if (id && (!wanted || wanted.has(id))) rememberEntity(byId, id, node, 'cache');
+      const entries = Array.isArray(node) ? [...node.entries()] : Object.entries(node);
+      if (entries.length > 300 && depth > 0) return;
+      for (const [key, value] of entries) {
+        if (value && typeof value === 'object') visit(value, depth + 1, key);
+      }
+    };
+    visit(data, 0, '');
+    return byId;
+  }
+
+  function detailsFromFalcorCache(cache, ids) {
+    if (!cache || typeof cache !== 'object') return {};
+    const payload = cache.videos ? { videos: cache.videos } : (cache.jsonGraph?.videos ? { jsonGraph: cache.jsonGraph } : null);
+    if (!payload) return {};
+    const wanted = Array.isArray(ids) && ids.length ? new Set(ids.map(String)) : null;
+    const byId = {};
+    for (const [id, meta] of Object.entries(metadataFromApiPayload(payload))) {
+      if (wanted && !wanted.has(id)) continue;
+      if (!useful(meta)) continue;
+      byId[id] = { ...meta, source: 'cache' };
+    }
+    return byId;
+  }
+
+  function publishDetails(path, byId, error) {
+    const payload = { source: 'minaflix-sync', type: 'details', path, byId, error: error || null };
+    try {
+      const origin = typeof location !== 'undefined' && /^https?:/.test(location.origin) ? location.origin : '*';
+      window.postMessage(payload, origin);
+    } catch {
+      // The service worker still receives the returned value.
+    }
+    return payload;
+  }
+
+  function readLiveCaches(win, ids) {
+    const context = win?.netflix?.reactContext || win?.netflix?.appContext || {};
+    const graphql = detailsFromGraphqlCache(graphqlCacheFromWindow(win) || graphqlCacheFromHtml(win?.document?.documentElement?.innerHTML || ''), ids);
+    const falcor = detailsFromFalcorCache(win?.netflix?.falcorCache || context.falcorCache || context.models?.falcorCache, ids);
+    return publishDetails('cache', { ...falcor, ...graphql }, null);
+  }
+
+  function graphqlEndpoint(win) {
+    try {
+      const api = readMemberApi(win?.netflix?.reactContext || win?.netflix?.appContext);
+      const defs = win?.netflix?.reactContext?.models?.serverDefs?.data || win?.netflix?.reactContext?.models?.serverDefs || {};
+      const hinted = defs.GRAPHQL_ENDPOINT || defs.graphqlEndpoint || defs.graphqlUrl || api?.graphqlEndpoint;
+      if (typeof hinted === 'string' && hinted.includes('graphql')) return hinted;
+    } catch {
+      // Fall through to the endpoint the signed-in web app uses.
+    }
+    return GRAPHQL_URL;
+  }
+
+  function discoverPersistedQuery(win, operationName) {
+    const html = String(win?.document?.documentElement?.innerHTML || '');
+    const pattern = new RegExp(`${operationName}[\\s\\S]{0,240}?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`, 'i');
+    const match = pattern.exec(html);
+    return match ? match[1] : null;
+  }
+
+  function rawDetailQuery(ids) {
+    const fields = [
+      'videoId', 'title', 'synopsis', 'contextualSynopsis { text }', 'latestYear', 'releaseYear', 'year',
+      'runtimeSec', 'displayRuntime', 'seasonCount', 'numSeasons', 'numSeasonsLabel', 'seasons { totalCount }',
+      'contentAdvisory { certificationValue }', 'genreTags { name }', 'genres { name }',
+      'cast { name }', 'creators { name }', 'directors { name }', 'storyArt { url }', 'boxArt { url }',
+    ].join(' ');
+    const selections = ids.map((id) => `v${id}: video(videoId: ${Number(id)}) { ${fields} }`).join('\n');
+    return `query MinaflixDetails { ${selections} }`;
+  }
+
+  function detailModalBody(id, queryId) {
+    return {
+      operationName: 'DetailModal',
+      variables: { videoId: Number(id), opaqueImageFormat: 'WEBP' },
+      extensions: { persistedQuery: { id: queryId || DETAIL_MODAL_QUERY_ID, version: 102 } },
+    };
+  }
+
+  function parseGraphqlDetails(payload) {
+    const byId = {};
+    const visit = (node, depth) => {
+      if (!node || typeof node !== 'object' || depth > 8) return;
+      const id = videoIdOf(node);
+      if (id && !byId[id]) {
+        const meta = metadataFromEntity(node, 'graphql');
+        if (useful(meta)) byId[id] = meta;
+      }
+      const values = Array.isArray(node) ? node : Object.values(node);
+      for (const value of values) if (value && typeof value === 'object') visit(value, depth + 1);
+    };
+    visit(payload?.data || null, 0);
+    return byId;
+  }
+
+  function keepWanted(byId, ids) {
+    const wanted = new Set(ids.map(String));
+    const kept = {};
+    for (const [id, meta] of Object.entries(byId || {})) if (wanted.has(id)) kept[id] = meta;
+    return kept;
+  }
+
+  function graphqlFailure(payload, status) {
+    const message = payload?.errors?.[0]?.message || payload?.error?.message || payload?.error || '';
+    if (message) return String(message).slice(0, 240);
+    if (status && status !== 200) return `HTTP ${status}`;
+    return '';
+  }
+
+  async function postGraphql(endpoint, body) {
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        credentials: 'include',
+        mode: 'cors',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const text = await response.text();
+      let json = null;
+      try { json = JSON.parse(text); } catch { json = null; }
+      const parsed = json ? parseGraphqlDetails(json) : {};
+      const failure = graphqlFailure(json, response.status);
+      if (!response.ok || (failure && !Object.keys(parsed).length)) return { ok: false, error: failure || `HTTP ${response.status}`, json };
+      return { ok: true, json };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'graphql fetch failed' };
+    }
+  }
+
+  async function fetchGraphqlDetails(win, ids) {
+    const list = (Array.isArray(ids) ? ids : []).map(String).filter((id) => /^\d{1,12}$/.test(id)).slice(0, 20);
+    const endpoint = graphqlEndpoint(win);
+    const byId = {};
+    const notes = [];
+    if (!list.length) return publishDetails('graphql', byId, null);
+    const raw = await postGraphql(endpoint, { query: rawDetailQuery(list) });
+    if (raw.ok) Object.assign(byId, keepWanted(parseGraphqlDetails(raw.json), list));
+    else if (raw.error) notes.push(raw.error);
+    const missing = list.filter((id) => !byId[id]);
+    if (missing.length && !Object.keys(byId).length) {
+      const queryId = discoverPersistedQuery(win, 'DetailModal') || DETAIL_MODAL_QUERY_ID;
+      let failures = 0;
+      for (const id of missing) {
+        const posted = await postGraphql(endpoint, detailModalBody(id, queryId));
+        const parsed = posted.ok ? keepWanted(parseGraphqlDetails(posted.json), [id]) : {};
+        if (parsed[id]) {
+          byId[id] = parsed[id];
+          failures = 0;
+        } else {
+          failures += 1;
+          notes.push(posted.error || `DetailModal had no metadata for ${id}`);
+          if (failures >= 2) break;
+        }
+        await sleep(900);
+      }
+    }
+    for (const meta of Object.values(byId)) meta.source = 'graphql';
+    const error = Object.keys(byId).length ? null : (notes[0] || 'graphql returned no details');
+    return publishDetails('graphql', byId, error);
+  }
+
+  function labeledList(root, label) {
+    const pattern = new RegExp(`^${label}\\s*:\\s*(.+)$`, 'i');
+    for (const node of root.querySelectorAll('span, div, p, li')) {
+      const text = clean(node.textContent);
+      if (!text || text.length > 500) continue;
+      const match = pattern.exec(text);
+      if (!match) continue;
+      const names = match[1].split(/[,،]/).map((name) => clean(name)).filter((name) => name && name.length < 80);
+      if (names.length) return names.slice(0, 16);
+    }
+    return [];
+  }
+
+  function metadataFromPreviewModal(doc) {
+    const nodes = [...doc.querySelectorAll('[data-uia*="previewModal"], [class*="previewModal"], [data-uia*="preview-modal"]')];
+    const generic = [...doc.querySelectorAll('[data-uia*="modal"]')].find((node) => node.querySelector('[data-uia*="synopsis"], [class*="synopsis"], [class*="detailsMetadata"]'));
+    const modal = nodes.find((node) => !nodes.some((other) => other !== node && other.contains(node))) || nodes[0] || generic;
+    if (!modal) return null;
+    const scope = modal.closest('[role="dialog"]') || modal;
+    const synopsis = clean(scope.querySelector('[data-uia*="synopsis"], [class*="synopsis"]')?.textContent);
+    const metaText = clean(scope.querySelector('[class*="detailsMetadata"]')?.textContent);
+    const yearMatch = /\b(?:19|20)\d{2}\b/.exec(clean(scope.querySelector('[data-uia*="year"], .year')?.textContent) || metaText || '');
+    const maturity = clean(scope.querySelector('[class*="maturity"], [data-uia*="maturity"]')?.textContent);
+    const durationText = clean(scope.querySelector('[class*="duration"], [data-uia*="runtime"], [data-uia*="duration"]')?.textContent);
+    const seasons = seasonsFromText(durationText) || seasonsFromText(metaText);
+    const runtimeMinutes = runtimeFromText(durationText) || (/season/i.test(metaText) ? null : runtimeFromText(metaText));
+    const about = scope.querySelector('[data-uia*="about"], [class*="about"]') || scope;
+    const images = [...scope.querySelectorAll('img')].map((img) => artworkUrl(img.getAttribute('src') || img.currentSrc)).filter(Boolean);
+    const backdrop = images.find((src) => /storyart|backdrop|billboard/i.test(src)) || null;
+    return {
+      title: clean(scope.querySelector('h2, h3, [data-uia*="title"]')?.textContent),
+      synopsis,
+      year: yearMatch ? yearMatch[0] : '',
+      maturity,
+      runtimeMinutes,
+      seasons,
+      genres: labeledList(about, 'genres?').length ? labeledList(about, 'genres?') : labeledList(scope, 'genres?'),
+      cast: labeledList(about, 'cast').length ? labeledList(about, 'cast') : labeledList(scope, 'cast'),
+      creators: labeledList(scope, 'creators?'),
+      directors: labeledList(scope, 'directors?'),
+      mediaType: seasons ? 'tv' : (runtimeMinutes ? 'movie' : null),
+      image: images.find((src) => src !== backdrop) || null,
+      backdrop,
+      source: 'modal',
+    };
+  }
+
+  function closePreviewModal(doc) {
+    const button = doc.querySelector('[data-uia*="previewModal-close"], [data-uia*="modal-close"], [class*="previewModal"] button[aria-label*="Close"]');
+    if (button && typeof button.click === 'function') button.click();
+  }
+
+  function openTitleModal(id) {
+    const link = document.querySelector(`a[href*="jbv=${id}"]`);
+    if (link && typeof link.click === 'function') {
+      link.click();
+      return 'click';
+    }
+    try {
+      history.pushState(history.state, '', `/browse?jbv=${id}`);
+      window.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
+    } catch {
+      // A later full navigation covers a router that ignores pushState.
+    }
+    return 'pushState';
+  }
+
+  async function waitForModal(timeoutMs) {
+    const started = Date.now();
+    const limit = timeoutMs || 8000;
+    while (Date.now() - started < limit) {
+      const meta = metadataFromPreviewModal(document);
+      if (meta && useful(meta)) return meta;
+      await sleep(200);
+    }
+    return null;
+  }
+
+  async function readLiveModal(id) {
+    closePreviewModal(document);
+    await sleep(300);
+    const via = openTitleModal(id);
+    const meta = await waitForModal();
+    if (!meta) return { path: 'modal', via, error: `preview modal did not show synopsis, year, maturity, or cast after ${via}` };
+    meta.source = 'modal';
+    closePreviewModal(document);
+    publishDetails('modal', { [String(id)]: meta }, null);
+    return { path: 'modal', via, meta };
+  }
+
+  async function readOpenModal(id) {
+    const meta = await waitForModal(12000);
+    if (!meta) return { path: 'modal', via: 'navigation', error: 'preview modal had no synopsis, year, maturity, or cast' };
+    meta.source = 'modal';
+    closePreviewModal(document);
+    publishDetails('modal', { [String(id)]: meta }, null);
+    return { path: 'modal', via: 'navigation', meta };
+  }
+
   root.MinaflixScrape = {
     collectMyList,
     collectViewing,
@@ -883,5 +1281,16 @@
     collectLiveBrowse,
     diagnoseTitleHtml,
     cardImage,
+    detailsFromGraphqlCache,
+    detailsFromFalcorCache,
+    readLiveCaches,
+    fetchGraphqlDetails,
+    parseGraphqlDetails,
+    rawDetailQuery,
+    detailModalBody,
+    metadataFromPreviewModal,
+    openTitleModal,
+    readLiveModal,
+    readOpenModal,
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);
