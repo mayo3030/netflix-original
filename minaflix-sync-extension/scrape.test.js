@@ -299,6 +299,8 @@ describe('title metadata parsers', () => {
     expect(api.buildId).toBe('build42');
     expect(dom.window.MinaflixScrape.memberApiUrl(api)).toBe('https://www.netflix.com/api/shakti/build42/pathEvaluator');
     const paths = JSON.stringify(dom.window.MinaflixScrape.metadataPaths(['81486332']));
+    expect(paths).toContain('jawSummary');
+    expect(paths).toContain('itemSummary');
     expect(paths).not.toMatch(/license|manifest|playback|drm/i);
   });
 });
@@ -424,6 +426,29 @@ describe('live title details', () => {
       },
     }, ['81989718']);
     expect(falcor['81989718']).toMatchObject({ title: 'The Body', synopsis: 'A body is found on the ice.', year: '2018', source: 'cache' });
+    const linked = api.detailsFromGraphqlCache({
+      data: {
+        'Show:81486332': {
+          __typename: 'Show',
+          videoId: 81486332,
+          title: 'Heartland',
+          contextualSynopsis: { __ref: 'ContextualSynopsis:1' },
+          cast: [{ __ref: 'Person:1' }],
+          directors: [{ __ref: 'Person:2' }],
+          genreTags: [{ __ref: 'Genre:1' }],
+        },
+        'ContextualSynopsis:1': { text: 'Amy heals horses and the people around them.' },
+        'Person:1': { name: 'Amber Marshall' },
+        'Person:2': { name: 'Dean Bennett' },
+        'Genre:1': { name: 'Drama' },
+      },
+    }, ['81486332']);
+    expect(linked['81486332']).toMatchObject({
+      synopsis: 'Amy heals horses and the people around them.',
+      cast: ['Amber Marshall'],
+      directors: ['Dean Bennett'],
+      genres: ['Drama'],
+    });
   });
 
   it('asks unifiedEntities for details and does not query the missing video field', async () => {
@@ -431,7 +456,12 @@ describe('live title details', () => {
     const api = dom.window.MinaflixScrape;
     const query = api.rawDetailQuery(['81486332']);
     expect(query).toContain('unifiedEntities');
-    expect(query).toContain('synopsis');
+    expect(query).toContain('... on Show');
+    expect(query).toContain('... on Movie');
+    expect(query).toContain('contextualSynopsis { text }');
+    expect(query).toContain('cast { name }');
+    expect(query).toContain('directors { name }');
+    expect(query.split('... on')[0]).not.toMatch(/\bvideoId\b/);
     expect(query).not.toMatch(/\bvideo\s*\(/);
     expect(query).not.toMatch(/license|manifest|playback|drm|promoVideo/i);
     const calls = [];
@@ -509,6 +539,37 @@ describe('live title details', () => {
     expect(api.modalMatches(dom.window.document, '81486332', 'Heartland')).toBe(true);
     expect(api.modalMatches(dom.window.document, '70281312', 'The Blacklist')).toBe(false);
     expect(api.openTitleModal('81486332')).toBe('click');
+  });
+
+  it('opens the About section and does not click Play', () => {
+    const dom = page(`
+      <div class="previewModal" data-uia="previewModal--container">
+        <button data-uia="play-button">Play</button>
+        <button data-uia="previewModal-about-tab">About Heartland</button>
+        <section data-uia="previewModal-about-heartland">
+          <span class="previewModal--tags-label">Director:</span><span>Dean Bennett</span>
+          <span class="previewModal--tags-label">Cast:</span><span>Amber Marshall</span>
+          <span class="previewModal--tags-label">Genres:</span><span>Drama</span>
+          <p data-uia="preview-modal-synopsis">Amy heals horses and the people around them in Alberta.</p>
+        </section>
+        <img class="previewModal--player-titleTreatment-logo" alt="Heartland">
+        <a href="/browse?jbv=81486332">Heartland</a>
+      </div>
+    `, 'https://www.netflix.com/browse?jbv=81486332');
+    const play = dom.window.document.querySelector('[data-uia="play-button"]');
+    const about = dom.window.document.querySelector('[data-uia="previewModal-about-tab"]');
+    let played = false;
+    play.click = () => { played = true; };
+    about.click = () => { about.setAttribute('data-opened', 'yes'); };
+    expect(dom.window.MinaflixScrape.openAboutSection(dom.window.document)).toBe(true);
+    expect(about.getAttribute('data-opened')).toBe('yes');
+    expect(played).toBe(false);
+    const meta = dom.window.MinaflixScrape.metadataFromPreviewModal(dom.window.document);
+    expect(meta.directors).toEqual(['Dean Bennett']);
+    expect(meta.cast).toEqual(['Amber Marshall']);
+    expect(meta.genres).toContain('Drama');
+    expect(meta.synopsis).toContain('Amy heals horses');
+    expect(meta.title).toBe('Heartland');
   });
 });
 

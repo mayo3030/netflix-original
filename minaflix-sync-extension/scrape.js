@@ -362,13 +362,21 @@
     };
   }
 
+  function withSummaries(video) {
+    const jaw = unwrap(video?.jawSummary);
+    const item = unwrap(video?.itemSummary);
+    if ((!jaw || typeof jaw !== 'object') && (!item || typeof item !== 'object')) return video;
+    return { ...video, ...(item && typeof item === 'object' ? item : {}), ...(jaw && typeof jaw === 'object' ? jaw : {}) };
+  }
+
   function metadataFromApiPayload(payload) {
     const videos = payload?.jsonGraph?.videos || payload?.videos || {};
     const byId = {};
     for (const [id, video] of Object.entries(videos)) {
       if (!/^\d{1,12}$/.test(id)) continue;
-      const meta = metadataFromVideo(video);
-      if (meta && (meta.synopsis || meta.image || meta.title || meta.cast.length)) byId[id] = meta;
+      const flat = withSummaries(video);
+      const meta = metadataFromVideo(flat);
+      if (meta && (meta.synopsis || meta.image || meta.title || meta.cast.length || meta.genres.length || meta.directors.length)) byId[id] = meta;
     }
     return byId;
   }
@@ -474,23 +482,11 @@
   }
 
   function metadataPaths(ids) {
-    const range = { from: 0, to: 14 };
     return ids.flatMap((id) => {
       const video = ['videos', Number(id)];
       return [
-        [...video, 'title'],
-        [...video, 'synopsis'],
-        [...video, 'year'],
-        [...video, 'runtime'],
-        [...video, 'seasonCount'],
-        [...video, 'maturity'],
-        [...video, 'summary'],
-        [...video, 'boxarts', '_342x192', 'jpg'],
-        [...video, 'storyarts', '_1632x873', 'jpg'],
-        [...video, 'genres', range, 'name'],
-        [...video, 'cast', range, 'name'],
-        [...video, 'creators', range, 'name'],
-        [...video, 'directors', range, 'name'],
+        [...video, 'jawSummary'],
+        [...video, 'itemSummary'],
       ];
     });
   }
@@ -970,9 +966,9 @@
       runtimeMinutes,
       seasons,
       genres: genreNames(entity),
-      cast: peopleFrom(entity, ['cast', 'actors']),
-      creators: peopleFrom(entity, ['creators']),
-      directors: peopleFrom(entity, ['directors']),
+      cast: peopleFrom(entity, ['cast', 'actors', 'starring']),
+      creators: peopleFrom(entity, ['creators', 'writers']),
+      directors: peopleFrom(entity, ['directors', 'director']),
       mediaType,
       image: art.image,
       backdrop: art.backdrop,
@@ -980,10 +976,30 @@
     };
   }
 
-  function rememberEntity(byId, id, node, source) {
-    if (!id || byId[id]) return;
-    const meta = metadataFromEntity({ ...node, videoId: node.videoId || Number(id) }, source);
-    if (useful(meta)) byId[id] = meta;
+  function resolveRefs(node, data, depth) {
+    if (!node || typeof node !== 'object' || depth > 5) return node;
+    if (typeof node.__ref === 'string') return resolveRefs(data[node.__ref], data, depth + 1);
+    if (Array.isArray(node)) return node.map((item) => resolveRefs(item, data, depth + 1));
+    const copy = {};
+    for (const [key, value] of Object.entries(node)) {
+      if (key === '__ref') continue;
+      copy[key] = value && typeof value === 'object' ? resolveRefs(value, data, depth + 1) : value;
+    }
+    return copy;
+  }
+
+  function richer(current, next) {
+    if (!current) return true;
+    const score = (meta) => (meta?.synopsis ? 4 : 0) + (meta?.cast?.length ? 3 : 0) + (meta?.genres?.length ? 2 : 0) + (meta?.directors?.length ? 2 : 0) + (meta?.creators?.length ? 1 : 0);
+    return score(next) > score(current);
+  }
+
+  function rememberEntity(byId, id, node, source, data) {
+    if (!id) return;
+    const resolved = data ? resolveRefs(node, data, 0) : node;
+    const meta = metadataFromEntity({ ...resolved, videoId: resolved.videoId || Number(id) }, source);
+    if (!useful(meta)) return;
+    if (!byId[id] || richer(byId[id], meta)) byId[id] = meta;
   }
 
   function detailsFromGraphqlCache(cache, ids) {
@@ -992,11 +1008,11 @@
     const data = cache?.data || cache;
     if (!data || typeof data !== 'object') return byId;
     const visit = (node, depth, keyHint) => {
-      if (!node || typeof node !== 'object' || depth > 5) return;
+      if (!node || typeof node !== 'object' || depth > 6) return;
       const id = videoIdOf(node) || idFromCacheKey(keyHint);
-      if (id && (!wanted || wanted.has(id))) rememberEntity(byId, id, node, 'cache');
+      if (id && (!wanted || wanted.has(id))) rememberEntity(byId, id, node, 'cache', data);
       const entries = Array.isArray(node) ? [...node.entries()] : Object.entries(node);
-      if (entries.length > 300 && depth > 0) return;
+      if (entries.length > 400 && depth > 0) return;
       for (const [key, value] of entries) {
         if (value && typeof value === 'object') visit(value, depth + 1, key);
       }
@@ -1056,17 +1072,86 @@
     return match ? match[1] : null;
   }
 
-  function unifiedDetailQuery(ids) {
-    const fields = [
-      '__typename', 'unifiedEntityId', 'videoId', 'title', 'synopsis', 'contextualSynopsis { text }',
-      'latestYear', 'releaseYear', 'year', 'runtimeSec', 'displayRuntime', 'seasonCount', 'numSeasons',
-      'numSeasonsLabel', 'seasons { totalCount }', 'contentAdvisory { certificationValue }',
-      'genreTags { name }', 'genres { name }', 'cast { name }', 'creators { name }', 'directors { name }',
-      'storyArt { url }', 'boxArt { url }',
-    ].join(' ');
+  const DETAIL_FIELD_NAMES = ['title', 'synopsis', 'contextualSynopsis', 'shortSynopsis', 'narrativeText', 'latestYear', 'releaseYear', 'year', 'runtimeSec', 'displayRuntime', 'seasonCount', 'numSeasons', 'numSeasonsLabel', 'seasons', 'contentAdvisory', 'genreTags', 'genres', 'moodTags', 'cast', 'actors', 'creators', 'directors', 'storyArt', 'boxArt'];
+
+  function cacheRoot(cache) {
+    const data = cache?.data || cache || {};
+    return data.ROOT_QUERY || data['ROOT_QUERY'] || {};
+  }
+
+  function observedTypeFields(cache) {
+    const data = cache?.data || cache || {};
+    const fields = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const typeName = value.__typename || (/^(Show|Movie|Video|Episode|Series|Person|Genre|ContextualSynopsis)/.exec(key) || [])[1];
+      if (!typeName) continue;
+      fields[typeName] = [...new Set([...(fields[typeName] || []), ...Object.keys(value).filter((name) => name !== '__typename' && !name.startsWith('__'))])];
+    }
+    return fields;
+  }
+
+  function unifiedCall(cache) {
+    const root = cacheRoot(cache);
+    for (const key of Object.keys(root)) {
+      const field = key.split(/[:(]/)[0];
+      if (!/unifiedEntit/i.test(field)) continue;
+      const args = /[:(](\{.*\})\)?$/.exec(key);
+      let argName = 'unifiedEntityIds';
+      try {
+        const parsed = JSON.parse(args?.[1] || '');
+        argName = Object.keys(parsed)[0] || argName;
+      } catch {
+        // The default argument matches the field that rejected videoId.
+      }
+      return { field, argName, sample: parsed };
+    }
+    return { field: 'unifiedEntities', argName: 'unifiedEntityIds', sample: null };
+  }
+
+  function entityIdVariables(ids, sample) {
+    const value = sample && typeof sample === 'object' ? Object.values(sample)[0] : null;
+    const first = Array.isArray(value) ? value[0] : value;
+    if (typeof first === 'number') return ids.map((id) => Number(id));
+    if (typeof first === 'string' && /^\d+$/.test(first)) return ids.map(String);
+    return ids.map((id) => `Video:${id}`);
+  }
+
+  function selectionFor(fieldName) {
+    if (/play|manifest|license|drm|stream|promoVideo|viewable/i.test(fieldName)) return '';
+    const nested = {
+      contextualSynopsis: ['text'],
+      shortSynopsis: ['text'],
+      narrativeText: ['text'],
+      contentAdvisory: ['certificationValue'],
+      genreTags: ['name'],
+      genres: ['name'],
+      moodTags: ['displayName'],
+      cast: ['name'],
+      actors: ['name'],
+      creators: ['name'],
+      directors: ['name'],
+      seasons: ['totalCount'],
+      storyArt: ['url'],
+      boxArt: ['url'],
+    }[fieldName];
+    return nested ? `${fieldName} { ${nested.join(' ')} }` : fieldName;
+  }
+
+  function fragmentSelections(typeName) {
+    const movieSkip = new Set(['seasonCount', 'numSeasons', 'numSeasonsLabel', 'seasons']);
+    return DETAIL_FIELD_NAMES.filter((name) => typeName !== 'Movie' || !movieSkip.has(name)).map((name) => selectionFor(name)).filter(Boolean);
+  }
+
+  function unifiedDetailQuery(ids, cache) {
+    const types = observedTypeFields(cache);
+    const extras = ['Video', 'Series', 'Episode'].filter((typeName) => types[typeName]);
+    const useTypes = ['Show', 'Movie', ...extras];
+    const fragments = useTypes.map((typeName) => `... on ${typeName} { ${fragmentSelections(typeName).join(' ')} }`);
+    const call = unifiedCall(cache);
     return {
-      query: `query MinaflixDetails($ids: [ID!]!) { unifiedEntities(unifiedEntityIds: $ids) { ${fields} } }`,
-      variables: { ids: ids.map((id) => `Video:${id}`) },
+      query: `query MinaflixDetails($ids: [ID!]!) { ${call.field}(${call.argName}: $ids) { __typename unifiedEntityId ${fragments.join(' ')} } }`,
+      variables: { ids: entityIdVariables(ids, call.sample) },
     };
   }
 
@@ -1106,10 +1191,27 @@
   }
 
   function graphqlFailure(payload, status) {
-    const message = payload?.errors?.[0]?.message || payload?.error?.message || payload?.error || '';
-    if (message) return String(message).slice(0, 240);
+    const messages = Array.isArray(payload?.errors) ? payload.errors.map((item) => item?.message).filter(Boolean) : [];
+    if (messages.length) return messages.join(' | ').slice(0, 800);
+    const message = payload?.error?.message || payload?.error || '';
+    if (message) return String(message).slice(0, 800);
     if (status && status !== 200) return `HTTP ${status}`;
     return '';
+  }
+
+  function withoutUndefinedField(query, error) {
+    const match = /FieldUndefined@\[([^\]]+)\]/.exec(String(error || ''));
+    const field = match?.[1]?.split('/').pop();
+    if (!field || !/^(videoId|unifiedEntityId|boxArt|storyArt|seasons|seasonCount|numSeasons|numSeasonsLabel|runtimeSec|displayRuntime|contentAdvisory|genreTags|genres|moodTags|cast|actors|creators|directors|contextualSynopsis|synopsis|shortSynopsis|narrativeText|latestYear|releaseYear|year)$/.test(field)) return '';
+    const next = query.replace(new RegExp(`\\b${field}\\b(?:\\s*\\{[^{}]*\\})?`, 'g'), ' ');
+    return next === query ? '' : next.replace(/\s{2,}/g, ' ').trim();
+  }
+
+  function withoutUnknownType(query, error) {
+    const match = /Unknown type ["']?([A-Za-z0-9_]+)["']?/.exec(String(error || ''));
+    if (!match) return '';
+    const next = query.replace(new RegExp(`\\.\\.\\. on ${match[1]} \\{[^{}]*\\}`, 'g'), ' ');
+    return next === query ? '' : next.replace(/\s{2,}/g, ' ').trim();
   }
 
   async function postGraphql(endpoint, body) {
@@ -1133,20 +1235,55 @@
     }
   }
 
+  async function postAdaptive(endpoint, body) {
+    let query = body.query;
+    let lastError = '';
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const posted = await postGraphql(endpoint, { ...body, query });
+      if (posted.ok) return posted;
+      lastError = posted.error || lastError;
+      const next = query ? (withoutUndefinedField(query, lastError) || withoutUnknownType(query, lastError)) : '';
+      if (!next) return { ok: false, error: lastError || 'graphql request failed' };
+      query = next;
+      await sleep(300);
+    }
+    return { ok: false, error: lastError || 'graphql request failed' };
+  }
+
+  async function mapPool(items, limit, worker) {
+    let cursor = 0;
+    async function run() {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        await worker(items[index], index);
+        await sleep(400);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => run()));
+  }
+
   async function fetchGraphqlDetails(win, ids) {
-    const list = (Array.isArray(ids) ? ids : []).map(String).filter((id) => /^\d{1,12}$/.test(id)).slice(0, 20);
+    const list = (Array.isArray(ids) ? ids : []).map(String).filter((id) => /^\d{1,12}$/.test(id));
     const endpoint = graphqlEndpoint(win);
+    const cache = graphqlCacheFromWindow(win) || graphqlCacheFromHtml(win?.document?.documentElement?.innerHTML || '');
     const byId = {};
     const notes = [];
     if (!list.length) return publishDetails('graphql', byId, null);
-    const raw = await postGraphql(endpoint, unifiedDetailQuery(list));
-    if (raw.ok) Object.assign(byId, keepWanted(parseGraphqlDetails(raw.json), list));
-    else if (raw.error) notes.push(raw.error);
-    const missing = list.filter((id) => !byId[id]);
-    const discovered = discoverPersistedQuery(win, 'DetailModal');
-    if (missing.length && !Object.keys(byId).length && discovered) {
+    for (let start = 0; start < list.length; start += 8) {
+      const chunk = list.slice(start, start + 8);
+      const posted = await postAdaptive(endpoint, unifiedDetailQuery(chunk, cache));
+      if (posted.ok) Object.assign(byId, keepWanted(parseGraphqlDetails(posted.json), chunk));
+      else if (posted.error) notes.push(posted.error);
+      if (!posted.ok && !Object.keys(byId).length) break;
+      if (start + 8 < list.length) await sleep(500);
+    }
+    let missing = list.filter((id) => !byId[id]);
+    const discovered = discoverPersistedQuery(win, 'DetailModal') || discoverPersistedQuery(win, 'MiniModal');
+    if (missing.length && discovered) {
       let failures = 0;
-      for (const id of missing) {
+      await mapPool(missing, 2, async (id) => {
+        if (failures >= 2 && !Object.keys(byId).length) return;
         const posted = await postGraphql(endpoint, detailModalBody(id, discovered));
         const parsed = posted.ok ? keepWanted(parseGraphqlDetails(posted.json), [id]) : {};
         if (parsed[id]) {
@@ -1154,11 +1291,9 @@
           failures = 0;
         } else {
           failures += 1;
-          notes.push(posted.error || `DetailModal had no metadata for ${id}`);
-          if (failures >= 1) break;
+          if (notes.length < 3) notes.push(posted.error || `persisted detail query had no metadata for ${id}`);
         }
-        await sleep(900);
-      }
+      });
     }
     for (const meta of Object.values(byId)) meta.source = 'graphql';
     const error = Object.keys(byId).length ? null : (notes[0] || 'graphql returned no details');
@@ -1203,6 +1338,7 @@
     if (/^genres?$/i.test(value)) return 'genres';
     if (/^creators?$/i.test(value)) return 'creators';
     if (/^directors?$/i.test(value)) return 'directors';
+    if (/^maturity(?: rating)?$/i.test(value)) return 'maturity';
     if (/^this (show|movie|series|film) is$/i.test(value)) return 'moods';
     return '';
   }
@@ -1232,7 +1368,7 @@
   }
 
   function aboutLists(scope) {
-    const found = { cast: [], genres: [], creators: [], directors: [], moods: [] };
+    const found = { cast: [], genres: [], creators: [], directors: [], moods: [], maturity: [] };
     for (const node of scope.querySelectorAll('span, div, dt, p, li')) {
       const own = directText(node).replace(/:$/, '');
       const short = clean(node.textContent);
@@ -1293,16 +1429,39 @@
     return urls.find((src) => /storyart|backdrop|billboard|boxart|hero/i.test(src)) || urls[0] || null;
   }
 
+  function modalVideoId(modal) {
+    if (!modal) return '';
+    for (const node of modal.querySelectorAll('a, [href]')) {
+      const match = /(?:[?&]jbv=|\/title\/|\/watch\/)(\d{1,12})(?:\D|$)/.exec(node.getAttribute('href') || '');
+      if (match) return match[1];
+    }
+    const data = modal.querySelector('[data-videoid], [data-video-id]');
+    const attr = data?.getAttribute('data-videoid') || data?.getAttribute('data-video-id') || '';
+    return /^\d{1,12}$/.test(attr) ? attr : '';
+  }
+
   function modalMatches(doc, id, expectedTitle) {
     const modal = findPreviewModal(doc);
     if (!modal || !/^\d{1,12}$/.test(String(id || ''))) return false;
-    const href = new RegExp(`(?:[?&]jbv=|/title/|/watch/)${id}(?:\\D|$)`);
-    const viewUrl = doc.defaultView?.location?.href || '';
-    if (href.test(viewUrl)) return true;
-    if ([...modal.querySelectorAll('a, [href]')].some((node) => href.test(node.getAttribute('href') || ''))) return true;
-    if (modal.querySelector(`[data-videoid="${id}"], [data-video-id="${id}"]`)) return true;
+    const found = modalVideoId(modal);
+    if (found) return found === String(id);
     const logo = logoTitle(modal);
-    return Boolean(expectedTitle && logo && titlesEqual(logo, expectedTitle));
+    const urlOk = new RegExp(`(?:[?&]jbv=|/title/|/watch/)${id}(?:\\D|$)`).test(doc.defaultView?.location?.href || '');
+    return Boolean(urlOk && expectedTitle && logo && titlesEqual(logo, expectedTitle));
+  }
+
+  function openAboutSection(doc) {
+    const modal = findPreviewModal(doc);
+    if (!modal) return false;
+    const about = [...modal.querySelectorAll('button, [role="tab"], a')].find((element) => {
+      const uia = element.getAttribute('data-uia') || '';
+      const label = clean(element.getAttribute('aria-label') || directText(element) || element.textContent);
+      if (/^(play|resume|watch)$/i.test(label) || /play-button|watch-video|billboard-play/i.test(uia)) return false;
+      return /^about\b/i.test(label) || /previewModal-about|about-/i.test(uia);
+    });
+    if (!about || typeof about.click !== 'function') return false;
+    about.click();
+    return true;
   }
 
   function modalSignature(doc) {
@@ -1318,27 +1477,33 @@
     const modal = findPreviewModal(doc);
     if (!modal) return null;
     const scope = modal.closest('[role="dialog"]') || modal;
-    const synopsis = clean(scope.querySelector('[data-uia*="synopsis"], [class*="synopsis"]')?.textContent);
+    const explicitSynopsis = clean(scope.querySelector('[data-uia*="synopsis"], [class*="synopsis"], [data-uia*="preview-modal-synopsis"]')?.textContent);
+    const paragraphs = [...scope.querySelectorAll('p, [data-uia*="synopsis"], [class*="synopsis"]')].map((node) => clean(node.textContent)).filter((text) => text.length > 40 && !sectionHeading(text) && !/^(cast|genres?|directors?|creators?|maturity)\b/i.test(text));
+    const synopsis = explicitSynopsis || paragraphs.sort((left, right) => right.length - left.length)[0] || '';
     const metaText = clean(scope.querySelector('[class*="detailsMetadata"]')?.textContent);
     const yearMatch = /\b(?:19|20)\d{2}\b/.exec(clean(scope.querySelector('[data-uia*="year"], .year')?.textContent) || metaText || '');
     const maturity = clean(scope.querySelector('[class*="maturity"], [data-uia*="maturity"]')?.textContent);
     const durationText = clean(scope.querySelector('[class*="duration"], [data-uia*="runtime"], [data-uia*="duration"]')?.textContent);
     const seasons = seasonsFromText(durationText) || seasonsFromText(metaText);
     const runtimeMinutes = runtimeFromText(durationText) || (/season/i.test(metaText) ? null : runtimeFromText(metaText));
-    const about = scope.querySelector('[data-uia*="about"], [class*="about"]') || scope;
+    const aboutNodes = [...scope.querySelectorAll('[data-uia*="previewModal-about"], [data-uia*="about-"], [data-uia*="about"], [class*="about"]')];
+    const about = aboutNodes.find((node) => /cast\s*:|genres?\s*:|directors?\s*:/i.test(node.textContent || '')) || aboutNodes.find((node) => !/tab|button/i.test(node.getAttribute('data-uia') || '')) || scope;
     const lists = aboutLists(about);
+    const wider = about === scope ? lists : aboutLists(scope);
+    const pickList = (key) => (lists[key]?.length ? lists[key] : wider[key]);
     const backdrop = backdropFromModal(scope);
+    const aboutMaturity = lists.maturity?.[0] || '';
     return {
       title: logoTitle(scope),
       synopsis,
       year: yearMatch ? yearMatch[0] : '',
-      maturity,
+      maturity: maturity || aboutMaturity,
       runtimeMinutes,
       seasons,
-      genres: [...new Set([...lists.genres, ...lists.moods])].slice(0, 16),
-      cast: lists.cast,
-      creators: lists.creators,
-      directors: lists.directors,
+      genres: [...new Set([...(pickList('genres') || []), ...(pickList('moods') || [])])].slice(0, 16),
+      cast: pickList('cast') || [],
+      creators: pickList('creators') || [],
+      directors: pickList('directors') || [],
       mediaType: seasons ? 'tv' : (runtimeMinutes ? 'movie' : null),
       image: null,
       backdrop,
@@ -1369,7 +1534,8 @@
   async function revealModalAbout(doc) {
     const modal = findPreviewModal(doc);
     if (!modal) return;
-    const about = modal.querySelector('[data-uia*="about"], [class*="about"]');
+    openAboutSection(doc);
+    const about = modal.querySelector('[data-uia*="previewModal-about"], [data-uia*="about-"], [data-uia*="about"], [class*="about"]');
     if (about && typeof about.scrollIntoView === 'function') {
       try { about.scrollIntoView({ block: 'center' }); } catch { about.scrollIntoView(); }
     }
@@ -1455,5 +1621,6 @@
     cardTitleOverDetail,
     modalMatches,
     sectionHeading,
+    openAboutSection,
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

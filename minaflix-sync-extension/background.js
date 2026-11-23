@@ -485,28 +485,54 @@ function prepareJob(job, message) {
   if (message && Object.prototype.hasOwnProperty.call(message, 'detailCap')) job.detailCap = parseCap(message.detailCap);
   else if (!Object.prototype.hasOwnProperty.call(job, 'detailCap')) job.detailCap = null;
   job.graphqlStopped = Boolean(job.graphqlStopped);
-  if (job.detailVersion !== 2) {
-    const redo = [];
-    for (const [id, meta] of Object.entries(job.details)) {
-      if (meta?.source === 'modal') {
-        delete job.details[id];
-        redo.push(id);
-      }
-    }
-    job.paths.modal = 0;
+  if (job.detailVersion !== 3) {
+    const redo = Object.keys(job.details).filter((id) => !detailComplete(job.details[id]));
     job.graphqlStopped = false;
     const queued = new Set([...job.pending, ...job.forModal]);
     for (const id of redo) if (!queued.has(id)) job.pending.push(id);
-    job.detailVersion = 2;
+    job.detailVersion = 3;
   }
   return job;
 }
 
+function detailComplete(meta) {
+  if (!meta?.synopsis) return false;
+  return Boolean(meta.cast?.length || meta.genres?.length || meta.directors?.length || meta.creators?.length);
+}
+
+function mergeMeta(current, next) {
+  if (!current) return next;
+  if (!next) return current;
+  const list = (left, right) => (left?.length ? left : (right || []));
+  return {
+    title: current.title || next.title || '',
+    synopsis: current.synopsis || next.synopsis || '',
+    year: current.year || next.year || '',
+    maturity: current.maturity || next.maturity || '',
+    runtimeMinutes: current.runtimeMinutes ?? next.runtimeMinutes ?? null,
+    seasons: current.seasons ?? next.seasons ?? null,
+    genres: list(current.genres, next.genres),
+    cast: list(current.cast, next.cast),
+    creators: list(current.creators, next.creators),
+    directors: list(current.directors, next.directors),
+    mediaType: current.mediaType || next.mediaType || null,
+    image: current.image || next.image || null,
+    backdrop: current.backdrop || next.backdrop || null,
+    source: next.source || current.source,
+  };
+}
+
 function rememberDetail(job, id, meta) {
-  if (!id || !meta || job.details[id]) return;
-  job.details[id] = meta;
-  const path = meta.source === 'api' || meta.source === 'graphql' || meta.source === 'modal' || meta.source === 'cache' ? meta.source : 'cache';
-  job.paths[path] += 1;
+  if (!id || !meta) return false;
+  const before = job.details[id];
+  const merged = mergeMeta(before, meta);
+  job.details[id] = merged;
+  const added = !before || merged.synopsis !== (before.synopsis || '') || (merged.cast || []).length !== (before.cast || []).length || (merged.genres || []).length !== (before.genres || []).length || (merged.directors || []).length !== (before.directors || []).length || (merged.creators || []).length !== (before.creators || []).length;
+  if (added) {
+    const path = meta.source === 'api' || meta.source === 'graphql' || meta.source === 'modal' || meta.source === 'cache' ? meta.source : 'cache';
+    job.paths[path] += 1;
+  }
+  return added;
 }
 
 function pathSummary(job) {
@@ -517,7 +543,7 @@ function pathSummary(job) {
 function takePending(job, count) {
   if (typeof job.detailCap === 'number' && job.detailAttempts >= job.detailCap) return [];
   const room = typeof job.detailCap === 'number' ? job.detailCap - job.detailAttempts : count;
-  const ids = job.pending.splice(0, Math.min(count, Math.max(0, room)));
+  const ids = job.pending.splice(0, Math.min(count, Math.max(0, room), 8));
   job.detailAttempts += ids.length;
   return ids;
 }
@@ -533,35 +559,34 @@ async function applyCachedDetails(tabId, job, send) {
   const byId = result?.byId || {};
   let added = 0;
   job.pending = job.pending.filter((id) => {
-    if (job.details[id]) return false;
-    if (!byId[id]) return true;
-    const before = job.paths.cache;
-    rememberDetail(job, id, byId[id]);
-    if (job.paths.cache > before) added += 1;
-    return false;
+    if (!byId[id]) return !detailComplete(job.details[id]);
+    if (rememberDetail(job, id, byId[id])) added += 1;
+    return !detailComplete(job.details[id]);
   });
   if (added) send({ type: 'progress', text: `Details via cache: ${added}. ${job.pending.length} left.` });
 }
 
 async function applyApiDetails(tabId, job, send) {
   if (!job.pending.length) return;
-  const ids = job.pending.slice(0, 40);
-  let found = {};
-  try {
-    found = await pageCall(tabId, { op: 'details', ids }) || {};
-  } catch (error) {
-    job.errors.push({ section: 'details', path: 'api', message: error instanceof Error ? error.message : 'member API request failed' });
-    send({ type: 'progress', text: 'Member API request failed. Trying the live GraphQL client.' });
-    return;
-  }
+  const queue = job.pending.slice();
   let added = 0;
-  job.pending = job.pending.filter((id) => {
-    if (!found[id]) return true;
-    const before = job.paths.api;
-    rememberDetail(job, id, found[id]);
-    if (job.paths.api > before) added += 1;
-    return false;
-  });
+  for (let index = 0; index < queue.length; index += 25) {
+    const ids = queue.slice(index, index + 25);
+    let found = {};
+    try {
+      found = await pageCall(tabId, { op: 'details', ids }) || {};
+    } catch (error) {
+      job.errors.push({ section: 'details', path: 'api', message: error instanceof Error ? error.message : 'member API request failed' });
+      send({ type: 'progress', text: 'Member API request failed. Trying the live GraphQL client.' });
+      break;
+    }
+    if (!Object.keys(found).length) break;
+    for (const id of ids) {
+      if (found[id] && rememberDetail(job, id, found[id])) added += 1;
+    }
+    if (index + 25 < queue.length) await sleep(700);
+  }
+  job.pending = job.pending.filter((id) => !detailComplete(job.details[id]));
   send({ type: 'progress', text: added ? `Details via member API: ${added}.` : 'Member API had no title details.' });
 }
 
@@ -581,7 +606,7 @@ async function applyGraphqlDetails(tabId, job, send) {
     const missed = [];
     for (const id of ids) {
       if (byId[id]) rememberDetail(job, id, byId[id]);
-      else missed.push(id);
+      if (!detailComplete(job.details[id])) missed.push(id);
     }
     if (!Object.keys(byId).length) {
       restorePending(job, missed);
@@ -693,7 +718,7 @@ async function syncCatalog(message) {
         }
       }
       const pending = [...new Set(rows.flatMap((row) => row.titles.map((item) => item.netflixId)))];
-      job = prepareJob({ rows, details: {}, pending, detailVersion: 2 }, message);
+      job = prepareJob({ rows, details: {}, pending, detailVersion: 3 }, message);
       await writeCatalogJob(job);
     } else {
       job = prepareJob(job, message);
