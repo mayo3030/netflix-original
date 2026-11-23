@@ -177,6 +177,8 @@ const CATALOG_ALARM = 'minaflix-catalog-resume';
 const CATALOG_PROGRESS = 'minaflix.catalog.progress';
 const progressLines = [];
 let catalogTask = null;
+let catalogStop = false;
+let currentJob = null;
 
 function catalogSend(payload) {
   if (payload?.text && (payload.type === 'progress' || payload.type === 'summary' || payload.type === 'done' || payload.type === 'error')) {
@@ -198,22 +200,27 @@ async function replayStatus() {
   if (catalogTask) catalogSend({ type: 'progress', text: 'Catalog sync is running in the background. Closing this popup will not stop it.' });
 }
 
-function ensureCatalog(message) {
+function startCatalogTask(work) {
   if (catalogTask) {
     catalogSend({ type: 'progress', text: 'Catalog sync is running in the background. Closing this popup will not stop it.' });
     return catalogTask;
   }
-  catalogTask = (async () => {
+  catalogStop = false;
+  catalogTask = work().finally(() => {
+    catalogTask = null;
+  });
+  return catalogTask;
+}
+
+function ensureCatalog(message) {
+  return startCatalogTask(async () => {
     if (message?.resume) {
       const existing = await readCatalogJob();
       if (!existing?.rows?.length) return;
     }
     chrome.alarms.create(CATALOG_ALARM, { periodInMinutes: 1 });
     await syncCatalog(message || { resume: true });
-  })().finally(() => {
-    catalogTask = null;
   });
-  return catalogTask;
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -235,8 +242,18 @@ chrome.runtime.onConnect.addListener((port) => {
       void replayStatus();
       return;
     }
+    if (message?.type === 'stop') {
+      catalogStop = true;
+      chrome.alarms.clear(CATALOG_ALARM);
+      catalogSend({ type: 'progress', text: 'Stopping after the current title. Collected details stay saved.' });
+      return;
+    }
+    if (message?.type === 'export-now') {
+      void exportCurrentJob();
+      return;
+    }
     if (message?.type !== 'start') return;
-    if (message.mode === 'catalog') {
+    if (message.mode === 'catalog' || message.mode === 'retry' || message.mode === 'trailers') {
       void ensureCatalog(message);
       return;
     }
@@ -347,11 +364,14 @@ async function exportAccount(port, isActive) {
 }
 
 async function readCatalogJob() {
+  if (currentJob?.rows?.length) return currentJob;
   const stored = await chrome.storage.local.get(CATALOG_JOB);
-  return stored[CATALOG_JOB] || null;
+  currentJob = stored[CATALOG_JOB] || null;
+  return currentJob;
 }
 
 async function writeCatalogJob(job) {
+  currentJob = job;
   await chrome.storage.local.set({ [CATALOG_JOB]: { ...job, updatedAt: new Date().toISOString() } });
 }
 
@@ -477,6 +497,7 @@ async function applyTrailers(job, send) {
   let reportedEmpty = false;
   for (const id of pending) {
     const info = titles.get(id);
+    if (catalogStop) break;
     send({ type: 'progress', text: `Trailers ${found}. Looking up ${info.title}…` });
     try {
       let html = '';
@@ -581,6 +602,7 @@ function prepareJob(job, message) {
   else if (!Object.prototype.hasOwnProperty.call(job, 'detailCap')) job.detailCap = null;
   if (message && Object.prototype.hasOwnProperty.call(message, 'lookupTrailers')) job.lookupTrailers = Boolean(message.lookupTrailers);
   job.trailers = job.trailers && typeof job.trailers === 'object' ? job.trailers : {};
+  job.skipped = Array.isArray(job.skipped) ? job.skipped : [];
   job.graphqlStopped = Boolean(job.graphqlStopped);
   if (job.detailVersion !== 3) {
     const redo = Object.keys(job.details).filter((id) => !detailComplete(job.details[id]));
@@ -689,7 +711,7 @@ async function applyApiDetails(tabId, job, send) {
 
 async function applyGraphqlDetails(tabId, job, send) {
   if (job.graphqlStopped) return;
-  while (job.pending.length) {
+  while (job.pending.length && !catalogStop) {
     const ids = takePending(job, 20);
     if (!ids.length) return;
     send({ type: 'progress', text: `GraphQL details for ${ids.length} titles…` });
@@ -721,27 +743,23 @@ async function applyGraphqlDetails(tabId, job, send) {
 }
 
 async function readModalDetail(tabId, id, title) {
-  let result = null;
   try {
-    result = await pageCall(tabId, { op: 'modal', id, title });
+    const result = await pageCallOnce(tabId, { op: 'modal', id, title });
+    if (result?.meta) return result;
+    return { error: result?.error || 'preview modal had no details within 15s' };
   } catch (error) {
-    result = { error: error instanceof Error ? error.message : 'modal reader failed' };
-  }
-  if (result?.meta) return result;
-  try {
-    await chrome.tabs.update(tabId, { url: `https://www.netflix.com/browse?jbv=${id}`, active: true });
-    await navigate(tabId, (url) => String(url).includes(`jbv=${id}`) || String(url).includes('/browse'));
-    await sleep(1500);
-    const opened = await pageCall(tabId, { op: 'modal-read', id, title });
-    return opened?.meta ? opened : { error: opened?.error || result?.error || 'preview modal was not readable after navigation' };
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : 'modal navigation failed' };
+    return { error: error instanceof Error ? error.message : 'modal reader failed' };
   }
 }
 
+function rememberSkip(job, id) {
+  job.skipped = Array.isArray(job.skipped) ? job.skipped : [];
+  if (id && !job.skipped.includes(id)) job.skipped.push(id);
+}
+
 async function applyModalDetails(tabId, job, send) {
-  let streak = 0;
   while (true) {
+    if (catalogStop) break;
     const fromGraphqlMiss = job.forModal.length > 0;
     if (!fromGraphqlMiss && typeof job.detailCap === 'number' && job.detailAttempts >= job.detailCap) {
       if (job.pending.length) send({ type: 'progress', text: `Detail limit ${job.detailCap} reached. Remaining titles keep their card images.` });
@@ -752,44 +770,145 @@ async function applyModalDetails(tabId, job, send) {
     if (!list.length) break;
     const id = list.shift();
     if (!fromGraphqlMiss) job.detailAttempts += 1;
-    send({ type: 'progress', text: `Modal for ${id}. ${pathSummary(job)}. ${list.length} left.` });
+    send({ type: 'progress', text: `Modal for ${id}. ${pathSummary(job)}. ${list.length} left. Skipped ${job.skipped.length}.` });
     let result = await readModalDetail(tabId, id, cardTitleFor(job, id));
-    if (!result?.meta) {
-      await sleep(1500);
-      result = await readModalDetail(tabId, id, cardTitleFor(job, id));
-    }
+    if (!result?.meta && !catalogStop) result = await readModalDetail(tabId, id, cardTitleFor(job, id));
     if (result?.meta) {
       rememberDetail(job, id, result.meta);
-      streak = 0;
       send({ type: 'progress', text: `Details via modal (${result.via || 'live'}): ${result.meta.title || id}.` });
     } else {
-      streak += 1;
+      rememberSkip(job, id);
       const message = result?.error || 'preview modal had no details';
       job.errors.push({ section: 'details', id, path: 'modal', message });
-      send({ type: 'progress', text: `Modal ${id}: ${message}` });
-      if (streak >= 15 && !job.paths.modal) {
-        const stop = 'Stopped modal lookups after 15 titles opened no details. Card images stay in the export.';
-        job.errors.push({ section: 'details', path: 'modal', message: stop });
-        send({ type: 'progress', text: stop });
-        job.pending = [];
-        job.forModal = [];
-        break;
-      }
+      send({ type: 'progress', text: `Skipped ${id}: ${message}` });
     }
     await writeCatalogJob(job);
-    if (job.pending.length || job.forModal.length) await sleep(1500 + Math.min(streak, 6) * 700);
+    if (catalogStop) break;
+    if (job.pending.length || job.forModal.length) await sleep(result?.meta ? 1000 : 2000);
   }
+}
+
+async function ensureBrowseTab() {
+  const tabs = await chrome.tabs.query({ url: ['https://www.netflix.com/*', 'https://netflix.com/*'] });
+  const current = tabs.find((tab) => typeof tab.id === 'number' && typeof tab.url === 'string' && tab.url.includes('/browse'));
+  if (current?.id && current.status === 'complete') return { tabId: current.id, finalUrl: current.url };
+  return openAndGo('https://www.netflix.com/browse', (url) => {
+    try { return new URL(url).pathname.startsWith('/browse'); } catch { return false; }
+  });
+}
+
+function rowsFromJob(job) {
+  return (job.rows || []).map((row) => ({
+    name: row.name,
+    titles: (row.titles || []).map((item) => catalogTitle(item, job.details?.[item.netflixId], job.trailers?.[item.netflixId])),
+  })).filter((row) => row.titles.length);
+}
+
+function summaryFor(job, rows) {
+  const count = rows.reduce((sum, row) => sum + row.titles.length, 0);
+  const images = rows.reduce((sum, row) => sum + row.titles.filter((item) => item.image).length, 0);
+  const detailed = Object.keys(job.details || {}).length;
+  const skipped = (job.skipped || []).length;
+  const trailerCount = Object.values(job.trailers || {}).filter((item) => item?.trailerYoutubeId).length;
+  const trailerNote = job.lookupTrailers || trailerCount ? ` Trailers ${trailerCount}.` : '';
+  return `Exported ${count} catalog titles in ${rows.length} rows. Images ${images}. Details ${detailed} (${pathSummary(job)}). Skipped ${skipped}.${trailerNote}`;
+}
+
+async function exportJob(job, keepJob) {
+  const rows = rowsFromJob(job);
+  const summary = summaryFor(job, rows);
+  catalogSend({ type: 'summary', text: summary });
+  await sleep(400);
+  await downloadCatalog(rows, summary, job.errors || []);
+  if (!keepJob) {
+    currentJob = null;
+    await chrome.storage.local.remove(CATALOG_JOB);
+    await chrome.alarms.clear(CATALOG_ALARM);
+  }
+  catalogSend({ type: 'done', text: summary });
+}
+
+async function exportCurrentJob() {
+  const job = currentJob?.rows?.length ? currentJob : await readCatalogJob();
+  if (!job?.rows?.length) {
+    catalogSend({ type: 'error', text: 'No saved catalog to export yet.' });
+    return;
+  }
+  const rows = rowsFromJob(job);
+  const summary = summaryFor(job, rows);
+  catalogSend({ type: 'summary', text: summary });
+  await downloadCatalog(rows, summary, job.errors || []);
+  const text = catalogTask ? `Exported the titles gathered so far. ${summary}` : summary;
+  catalogSend({ type: catalogTask ? 'progress' : 'done', text });
+}
+
+async function runTrailersOnly() {
+  const job = await readCatalogJob();
+  if (!job?.rows?.length) {
+    catalogSend({ type: 'error', text: 'No saved catalog. Sync the rows first.' });
+    return;
+  }
+  job.lookupTrailers = true;
+  await writeCatalogJob(job);
+  const found = await applyTrailers(job, catalogSend);
+  if (catalogStop) {
+    await writeCatalogJob(job);
+    catalogSend({ type: 'progress', text: `Trailer lookup stopped. Trailers ${found} saved with the job.` });
+    catalogSend({ type: 'done', text: `Stopped. Trailers ${found}.` });
+    return;
+  }
+  await exportJob(job, true);
+}
+
+async function retryMissing(message) {
+  const job = await readCatalogJob();
+  if (!job?.rows?.length) {
+    catalogSend({ type: 'error', text: 'No saved catalog. Sync the rows first.' });
+    return;
+  }
+  const ids = new Set([...(job.skipped || []), ...(job.pending || []), ...(job.forModal || [])]);
+  for (const row of job.rows) {
+    for (const item of row.titles || []) {
+      if (item?.netflixId && !detailComplete(job.details?.[item.netflixId])) ids.add(item.netflixId);
+    }
+  }
+  job.pending = [...ids].filter((id) => !detailComplete(job.details?.[id]));
+  job.forModal = [];
+  job.skipped = [];
+  if (message && Object.prototype.hasOwnProperty.call(message, 'lookupTrailers')) job.lookupTrailers = Boolean(message.lookupTrailers);
+  await writeCatalogJob(job);
+  if (!job.pending.length) {
+    catalogSend({ type: 'progress', text: 'No missing details to retry.' });
+    catalogSend({ type: 'done', text: `Details ${Object.keys(job.details || {}).length} kept.` });
+    return;
+  }
+  catalogSend({ type: 'progress', text: `Retrying ${job.pending.length} titles. ${Object.keys(job.details || {}).length} details kept.` });
+  const opened = await ensureBrowseTab();
+  await applyModalDetails(opened.tabId, job, catalogSend);
+  await writeCatalogJob(job);
+  if (catalogStop) {
+    catalogSend({ type: 'progress', text: 'Stopped. Saved job kept.' });
+    catalogSend({ type: 'done', text: `Stopped. Details ${Object.keys(job.details || {}).length} kept.` });
+    return;
+  }
+  catalogSend({ type: 'done', text: `Retry finished. Details ${Object.keys(job.details || {}).length}. Skipped ${(job.skipped || []).length}.` });
 }
 
 async function syncCatalog(message) {
   const send = catalogSend;
   try {
+    if (message?.mode === 'trailers') {
+      await runTrailersOnly();
+      return;
+    }
+    if (message?.mode === 'retry') {
+      await retryMissing(message);
+      return;
+    }
     send({ type: 'progress', text: 'Opening Netflix browse…' });
-    const opened = await openAndGo('https://www.netflix.com/browse', (url) => {
-      try { return new URL(url).pathname.startsWith('/browse'); } catch { return false; }
-    });
+    const opened = await ensureBrowseTab();
     let job = await readCatalogJob();
-    if (!job?.rows?.length || job.rowPass !== 2) {
+    if (!job?.rows?.length) {
       send({ type: 'progress', text: 'Reading home rows…' });
       let rows = [];
       let genres = [];
@@ -846,23 +965,19 @@ async function syncCatalog(message) {
       send({ type: 'progress', text: 'Detail limit 0. Saving card images without more lookups.' });
     }
     await writeCatalogJob(job);
-    const trailerCount = await applyTrailers(job, send);
-    const rows = job.rows.map((row) => ({
-      name: row.name,
-      titles: row.titles.map((item) => catalogTitle(item, job.details[item.netflixId], job.trailers?.[item.netflixId])),
-    })).filter((row) => row.titles.length);
-    const count = rows.reduce((sum, row) => sum + row.titles.length, 0);
-    const images = rows.reduce((sum, row) => sum + row.titles.filter((item) => item.image).length, 0);
-    const detailed = Object.keys(job.details).length;
-    const failure = detailed === 0 ? (job.errors || []).find((item) => item.message) : null;
-    const trailerNote = job.lookupTrailers ? ` Trailers ${trailerCount}.` : '';
-    const summary = `Exported ${count} catalog titles in ${rows.length} rows. Images ${images}. Details ${detailed} (${pathSummary(job)}).${trailerNote}${failure ? ` ${failure.message}` : ''}`;
-    send({ type: 'summary', text: summary });
-    await sleep(400);
-    await downloadCatalog(rows, summary, job.errors || []);
-    await chrome.storage.local.remove(CATALOG_JOB);
-    await chrome.alarms.clear(CATALOG_ALARM);
-    send({ type: 'done', text: summary });
+    if (catalogStop) {
+      send({ type: 'progress', text: `Stopped. ${Object.keys(job.details).length} details kept. ${(job.skipped || []).length} skipped.` });
+      send({ type: 'done', text: 'Stopped. The saved job is still on this computer.' });
+      return;
+    }
+    await applyTrailers(job, send);
+    if (catalogStop) {
+      await writeCatalogJob(job);
+      send({ type: 'progress', text: 'Stopped during trailer lookup. Collected details and trailers stay saved.' });
+      send({ type: 'done', text: 'Stopped. The saved job is still on this computer.' });
+      return;
+    }
+    await exportJob(job, false);
   } catch (error) {
     send({ type: 'error', text: error instanceof Error ? error.message : 'Catalog sync failed. Open the extension again to resume.' });
   }
