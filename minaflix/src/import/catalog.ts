@@ -1,0 +1,283 @@
+import { hueFromId, patternFromId } from '../text';
+import type { CatalogRow, Title } from '../types';
+import { NetflixImportError, type NetflixEntry } from './netflix';
+
+const CATALOG_KEY = 'minaflix.catalog.v1';
+
+export type CatalogTitle = NetflixEntry;
+
+export type StoredCatalog = {
+  rows: { name: string; titles: CatalogTitle[] }[];
+};
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim()).slice(0, 20);
+}
+
+function entryFrom(value: unknown): CatalogTitle | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as CatalogTitle & { source?: unknown };
+  if (typeof record.title !== 'string' || !record.title.trim()) return null;
+  const netflixId = typeof record.netflixId === 'string' && /^\d{1,12}$/.test(record.netflixId) ? record.netflixId : null;
+  return {
+    title: record.title.trim(),
+    showTitle: typeof record.showTitle === 'string' ? record.showTitle : null,
+    netflixId,
+    watchedAt: null,
+    synopsis: realSynopsis(record.synopsis),
+    image: typeof record.image === 'string' && record.image.startsWith('https://') ? record.image : null,
+    backdrop: typeof record.backdrop === 'string' && record.backdrop.startsWith('https://') ? record.backdrop : null,
+    year: typeof record.year === 'string' ? record.year : null,
+    maturity: typeof record.maturity === 'string' ? record.maturity : null,
+    genres: stringList(record.genres),
+    cast: stringList(record.cast),
+    creators: stringList(record.creators),
+    directors: stringList(record.directors),
+    runtimeMinutes: typeof record.runtimeMinutes === 'number' ? record.runtimeMinutes : null,
+    seasons: typeof record.seasons === 'number' ? record.seasons : null,
+    mediaType: record.mediaType === 'tv' || record.mediaType === 'movie' ? record.mediaType : null,
+    detailSource: record.source === 'api' || record.source === 'page' || record.source === 'cache' || record.source === 'graphql' || record.source === 'modal'
+      ? record.source
+      : record.detailSource ?? null,
+    trailerYoutubeId: youtubeId(record.trailerYoutubeId),
+    trailerTitle: typeof record.trailerTitle === 'string' ? record.trailerTitle : null,
+    trailerChannel: typeof record.trailerChannel === 'string' ? record.trailerChannel : null,
+  };
+}
+
+export function realSynopsis(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.replace(/\s+/g, ' ').trim();
+  if (!text || /parents strongly cautioned|may not be suitable for ages|suitable for|recommended for ages|viewer discretion|mature content/i.test(text)) return null;
+  return text;
+}
+
+function youtubeId(value: unknown): string | null {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{11}$/.test(value) ? value : null;
+}
+
+export function youtubeTrailerSearchUrl(title: string, year: string): string {
+  const query = [title, year, 'official trailer Netflix'].filter((part) => part.trim()).join(' ');
+  return `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+}
+
+export function parseCatalogFile(text: string): StoredCatalog {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new NetflixImportError('That JSON file could not be parsed.');
+  }
+  const record = parsed as { kind?: unknown; rows?: unknown };
+  if (record.kind !== 'catalog' || !Array.isArray(record.rows)) {
+    throw new NetflixImportError('That file is not a MinaFlix catalog export.');
+  }
+  const rows = record.rows.flatMap((row) => {
+    if (!row || typeof row !== 'object') return [];
+    const named = row as { name?: unknown; titles?: unknown };
+    const name = typeof named.name === 'string' ? named.name.trim() : '';
+    const titles = Array.isArray(named.titles) ? named.titles.flatMap((item) => {
+      const entry = entryFrom(item);
+      return entry ? [entry] : [];
+    }) : [];
+    return name && titles.length ? [{ name, titles }] : [];
+  });
+  if (!rows.length) throw new NetflixImportError('That catalog file has no titles.');
+  return { rows: preferCardTitles(rows) };
+}
+
+function titleRank(title: string): number {
+  const text = title.trim();
+  if (!text || /^(episodes|more like this|trailers(?:\s*&\s*more)?)$/i.test(text)) return 0;
+  if (/^about\s+/i.test(text)) return 1;
+  return 2;
+}
+
+function cleanedTitle(title: string): string {
+  return title.trim().replace(/^about\s+/i, '').trim() || title.trim();
+}
+
+function preferCardTitles(rows: StoredCatalog['rows']): StoredCatalog['rows'] {
+  const best = new Map<string, { title: string; rank: number }>();
+  for (const row of rows) {
+    for (const title of row.titles) {
+      if (!title.netflixId) continue;
+      const rank = titleRank(title.title);
+      const current = best.get(title.netflixId);
+      if (!current || rank > current.rank) best.set(title.netflixId, { title: cleanedTitle(title.title), rank });
+    }
+  }
+  const trailers = new Map<string, Pick<CatalogTitle, 'trailerYoutubeId' | 'trailerTitle' | 'trailerChannel'>>();
+  for (const row of rows) {
+    for (const title of row.titles) {
+      if (!title.netflixId || !title.trailerYoutubeId || trailers.has(title.netflixId)) continue;
+      trailers.set(title.netflixId, {
+        trailerYoutubeId: title.trailerYoutubeId,
+        trailerTitle: title.trailerTitle ?? null,
+        trailerChannel: title.trailerChannel ?? null,
+      });
+    }
+  }
+  return rows.map((row) => ({
+    ...row,
+    titles: row.titles.map((title) => {
+      const preferred = title.netflixId ? best.get(title.netflixId) : null;
+      const trailer = title.netflixId ? trailers.get(title.netflixId) : null;
+      const next = {
+        ...title,
+        title: preferred && preferred.rank > 0 ? preferred.title : cleanedTitle(title.title),
+        trailerYoutubeId: title.trailerYoutubeId || trailer?.trailerYoutubeId || null,
+        trailerTitle: title.trailerTitle || trailer?.trailerTitle || null,
+        trailerChannel: title.trailerChannel || trailer?.trailerChannel || null,
+      };
+      return next;
+    }),
+  }));
+}
+
+export function titleFromCatalog(entry: CatalogTitle): Title {
+  const id = entry.netflixId ? `netflix-${entry.netflixId}` : `netflix-title-${entry.title}`;
+  return {
+    id,
+    source: 'mock',
+    mediaType: entry.mediaType === 'tv' ? 'tv' : 'movie',
+    title: entry.title,
+    titleAr: '',
+    overview: realSynopsis(entry.synopsis) || '',
+    overviewAr: '',
+    posterUrl: entry.image ?? null,
+    backdropUrl: entry.backdrop ?? entry.image ?? null,
+    rating: 0,
+    year: entry.year || '',
+    genreIds: [],
+    genreNames: entry.genres ?? [],
+    hue: hueFromId(id),
+    pattern: patternFromId(id),
+    trailerKey: entry.trailerYoutubeId || null,
+    runtime: entry.runtimeMinutes ?? null,
+    seasons: entry.seasons ?? null,
+    cast: (entry.cast ?? []).map((name, index) => ({
+      id: index + 1,
+      name,
+      nameAr: '',
+      character: '',
+      characterAr: '',
+      profileUrl: null,
+    })),
+    detailsLoaded: true,
+    detailsError: false,
+    openCinema: false,
+    credit: null,
+    netflixId: entry.netflixId,
+    maturity: entry.maturity ?? null,
+    creators: entry.creators ?? [],
+    directors: entry.directors ?? [],
+  };
+}
+
+export function loadStoredCatalog(): StoredCatalog | null {
+  try {
+    const raw = localStorage.getItem(CATALOG_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredCatalog;
+    return parsed?.rows?.length ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function filledText(value: string | null | undefined): string | null | undefined {
+  return value && value.trim() ? value : null;
+}
+
+function filledList(value: string[] | undefined): string[] | undefined {
+  return value && value.length ? value : undefined;
+}
+
+export function mergeCatalogTitle(current: CatalogTitle, incoming: CatalogTitle): CatalogTitle {
+  return {
+    ...incoming,
+    ...current,
+    title: titleRank(incoming.title) > titleRank(current.title) ? incoming.title : current.title,
+    synopsis: realSynopsis(current.synopsis) || realSynopsis(incoming.synopsis) || null,
+    image: current.image || incoming.image || null,
+    backdrop: current.backdrop || incoming.backdrop || null,
+    year: filledText(current.year) || filledText(incoming.year) || null,
+    maturity: filledText(current.maturity) || filledText(incoming.maturity) || null,
+    genres: filledList(current.genres) || filledList(incoming.genres) || [],
+    cast: filledList(current.cast) || filledList(incoming.cast) || [],
+    creators: filledList(current.creators) || filledList(incoming.creators) || [],
+    directors: filledList(current.directors) || filledList(incoming.directors) || [],
+    runtimeMinutes: current.runtimeMinutes ?? incoming.runtimeMinutes ?? null,
+    seasons: current.seasons ?? incoming.seasons ?? null,
+    mediaType: current.mediaType || incoming.mediaType || null,
+    trailerYoutubeId: current.trailerYoutubeId || incoming.trailerYoutubeId || null,
+    trailerTitle: filledText(current.trailerTitle) || filledText(incoming.trailerTitle) || null,
+    trailerChannel: filledText(current.trailerChannel) || filledText(incoming.trailerChannel) || null,
+    detailSource: current.detailSource || incoming.detailSource || null,
+  };
+}
+
+export function mergeStoredCatalog(next: StoredCatalog): StoredCatalog {
+  const current = loadStoredCatalog();
+  const rows = (current?.rows ?? []).map((row) => ({ ...row, titles: [...row.titles] }));
+  const located = new Map<string, { row: number; title: number }>();
+  rows.forEach((row, rowIndex) => {
+    row.titles.forEach((title, titleIndex) => {
+      if (title.netflixId && !located.has(title.netflixId)) located.set(title.netflixId, { row: rowIndex, title: titleIndex });
+    });
+  });
+  for (const row of next.rows) {
+    let rowIndex = rows.findIndex((item) => item.name === row.name);
+    if (rowIndex < 0) {
+      rows.push({ name: row.name, titles: [] });
+      rowIndex = rows.length - 1;
+    }
+    for (const title of row.titles) {
+      const place = title.netflixId ? located.get(title.netflixId) : undefined;
+      if (place) {
+        rows[place.row].titles[place.title] = mergeCatalogTitle(rows[place.row].titles[place.title], title);
+        continue;
+      }
+      rows[rowIndex].titles.push(title);
+      if (title.netflixId) located.set(title.netflixId, { row: rowIndex, title: rows[rowIndex].titles.length - 1 });
+    }
+  }
+  const stored = { rows };
+  localStorage.setItem(CATALOG_KEY, JSON.stringify(stored));
+  return stored;
+}
+
+export function clearStoredCatalog(): void {
+  localStorage.removeItem(CATALOG_KEY);
+}
+
+function featureScore(title: Title): number {
+  return (title.netflixId ? 4 : 0) + (title.backdropUrl ? 2 : 0) + (title.posterUrl ? 1 : 0) + (title.overview ? 2 : 0);
+}
+
+export function heroKickerKey(title: { netflixId?: string | null }, source: 'mock' | 'tmdb'): 'yourCatalog' | 'demoCatalog' | 'liveData' {
+  if (title.netflixId) return 'yourCatalog';
+  return source === 'mock' ? 'demoCatalog' : 'liveData';
+}
+
+export function catalogRows(stored: StoredCatalog): { hero: Title; rows: CatalogRow[] } {
+  const rows = stored.rows.map((row, index) => ({
+    id: `netflix-row-${index}`,
+    title: row.name,
+    titleAr: row.name,
+    titles: row.titles.map(titleFromCatalog),
+  }));
+  const titles = rows.flatMap((row) => row.titles);
+  const hero = titles.reduce<Title | null>((best, title) => {
+    if (!best || featureScore(title) > featureScore(best)) return title;
+    return best;
+  }, null);
+  if (!hero) throw new NetflixImportError('That catalog file has no titles.');
+  return { hero, rows };
+}
+
+export function netflixWatchUrl(netflixId: string): string {
+  return `https://www.netflix.com/watch/${netflixId}`;
+}

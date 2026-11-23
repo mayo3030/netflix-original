@@ -1,0 +1,13 @@
+{
+  "name": "minaflix-workspace",
+  "private": true,
+  "workspaces": [
+    "minaflix"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w minaflix",
+    "build": "npm run build -w minaflix",
+    "preview": "npm run preview -w minaflix",
+    "test": "npm run test -w minaflix"
+  }
+}

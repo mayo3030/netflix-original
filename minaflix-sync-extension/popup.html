@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Export to MinaFlix</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <strong>MinaFlix</strong>
+      <span>Sync</span>
+    </header>
+    <p>Export the titles on your own My List and viewing activity. The file stays on this computer.</p>
+    <button id="export" type="button">Export My List and history</button>
+    <button id="catalog" class="ghost" type="button">Sync full catalog</button>
+    <button id="retry" class="ghost" type="button">Retry missing details</button>
+    <button id="trailers-only" class="ghost" type="button">Trailers only</button>
+    <button id="export-now" class="ghost" type="button">Export now</button>
+    <button id="stop" class="ghost" type="button">Stop sync</button>
+    <label class="cap">Detail limit
+      <input id="cap" type="number" min="0" step="1" placeholder="all" />
+    </label>
+    <label class="cap">
+      <span>YouTube trailers</span>
+      <input id="trailers" type="checkbox" checked />
+    </label>
+    <p id="summary" role="status"></p>
+    <p id="status"></p>
+    <p class="fine">Read-only. This does not ask for your password, read cookies, or touch video. Full catalog sync keeps running if you close this popup. Netflix’s pages can change, and this export may violate Netflix’s terms.</p>
+    <script src="popup.js"></script>
+  </body>
+</html>
