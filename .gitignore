@@ -1,32 +1,38 @@
-# Python
+# Dependencies and build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+npm-debug.log*
+*.log
+
+# Python leftovers from local runs
 __pycache__/
 *.py[cod]
-*.so
 .venv/
 venv/
 env/
-.env
 
-# Sensitive files - DO NOT COMMIT
+# Session and device material that must never be committed
 netflix_cookies.json
 netflix_cookies.txt
 netflix_local_storage.json
 netflix_session_storage.json
 *.wvd
-
-# Browser data
 browser_profile/
-
-# Output
 output/
 *.mp4
 *.webm
 *.mkv
 
-# IDE
+# Editors and OS
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db
