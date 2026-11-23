@@ -1,21 +1,28 @@
 const button = document.getElementById('export');
 const status = document.getElementById('status');
+const lines = [];
+
+function pushStatus(text) {
+  lines.push(text);
+  status.textContent = lines.slice(-8).join('\n');
+}
 
 button.addEventListener('click', () => {
   button.disabled = true;
-  status.textContent = 'Starting…';
+  lines.length = 0;
+  pushStatus('Starting…');
   const port = chrome.runtime.connect({ name: 'minaflix-export' });
   port.onMessage.addListener((message) => {
     if (message?.type === 'progress' && typeof message.text === 'string') {
-      status.textContent = message.text;
+      pushStatus(message.text);
     }
     if (message?.type === 'done') {
-      status.textContent = message.text || 'Saved minaflix-netflix-export.json.';
+      pushStatus(message.text || 'Saved minaflix-netflix-export.json.');
       button.disabled = false;
       port.disconnect();
     }
     if (message?.type === 'error') {
-      status.textContent = message.text || 'Export failed.';
+      pushStatus(message.text || 'Export failed.');
       button.disabled = false;
       port.disconnect();
     }

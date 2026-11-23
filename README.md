@@ -90,8 +90,11 @@ Netflix can change its page markup, so the export may come back empty or partial
 2. Turn on Developer mode.
 3. Choose **Load unpacked** and select the `minaflix-sync-extension/` folder.
 4. In that same browser, sign in at [netflix.com](https://www.netflix.com/).
-5. Click the extension icon, then **Export to MinaFlix**.
-6. Leave the tab alone while it opens your My List and viewing activity. It scrolls and presses Show more slowly, then downloads `minaflix-netflix-export.json`.
+5. Click the extension icon, then **Export to MinaFlix**. Keep the popup open.
+6. The extension opens your My List, then viewing activity. Netflix currently redirects `/viewingactivity` to `/settings/viewed`; both addresses are accepted. It waits for the rows to render and presses **Show More** until that button is gone. The popup lists how many titles it has so far.
+7. It downloads `minaflix-netflix-export.json`. If one page fails, the other page is still saved, and the popup says which part failed.
+
+Reload the unpacked extension after an update (`chrome://extensions` → reload). A long watch history can take a few minutes because Show More is clicked slowly.
 
 ### Import
 

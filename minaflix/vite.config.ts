@@ -7,6 +7,6 @@ export default defineConfig({
   preview: { host: true, port: 4173 },
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', '../minaflix-sync-extension/**/*.test.js'],
   },
 });
