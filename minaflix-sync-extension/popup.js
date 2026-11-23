@@ -1,5 +1,6 @@
 const button = document.getElementById('export');
 const status = document.getElementById('status');
+const summary = document.getElementById('summary');
 const lines = [];
 
 function pushStatus(text) {
@@ -17,7 +18,7 @@ button.addEventListener('click', () => {
       pushStatus(message.text);
     }
     if (message?.type === 'done') {
-      pushStatus(message.text || 'Saved minaflix-netflix-export.json.');
+      summary.textContent = message.text || 'Exported 0 watched, 0 My List';
       button.disabled = false;
       port.disconnect();
     }

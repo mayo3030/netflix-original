@@ -109,41 +109,79 @@
     return { items };
   }
 
-  function collectViewing(doc) {
-    if (isSignedOut(doc)) return { error: 'Sign in to Netflix in this browser, then export again.', items: [] };
+  function showTitleFrom(title) {
+    const match = /^(.*?)\s*:\s*Season\b/i.exec(title);
+    const name = match ? clean(match[1]) : '';
+    return name && name !== title ? name : null;
+  }
+
+  function viewingItem(title, netflixId, watchedAt) {
+    if (!title || !netflixId) return null;
+    return { title, showTitle: showTitleFrom(title), netflixId, watchedAt: watchedAt || null };
+  }
+
+  function dateFromDescription(description) {
+    if (!description) return null;
+    const dateNode = description.querySelector(':scope > span');
+    return dateFromText(dateNode ? dateNode.textContent : '') || null;
+  }
+
+  function collectModernViewing(doc) {
     const items = [];
     const seen = new Set();
-    for (const anchor of titleAnchors(doc)) {
-      const netflixId = netflixIdFromHref(anchor.getAttribute('href'));
-      const title = titleFromAnchor(anchor);
-      if (!title) continue;
-      const watchedAt = dateFromScope(rowFor(anchor));
-      const key = `${netflixId || title}|${watchedAt || ''}`;
+    for (const row of doc.querySelectorAll('[data-uia="viewing-activity-page+list-item"]')) {
+      const link = row.querySelector('[data-uia="viewing-activity-page+list-item+description+title-link"]')
+        || row.querySelector('a[href*="/title/"], a[href*="/watch/"]');
+      if (!link) continue;
+      const description = row.querySelector('[data-uia="viewing-activity-page+list-item+description"]');
+      const item = viewingItem(
+        clean(link.textContent),
+        netflixIdFromHref(link.getAttribute('href')),
+        dateFromDescription(description),
+      );
+      if (!item) continue;
+      const key = `${item.netflixId}|${item.watchedAt || ''}|${item.title}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      items.push({ title, netflixId, watchedAt });
+      items.push(item);
       if (items.length >= 500) break;
     }
-    if (items.length === 0) {
-      for (const row of doc.querySelectorAll('.retableRow, [data-list-item], article, li, tr')) {
-        const text = row.textContent || '';
-        if (text.length > 300) continue;
-        const watchedAt = dateFromScope(row);
-        const titleLink = row.querySelector('a[href*="/title/"], a[href*="/watch/"]');
-        const title = titleLink ? titleFromAnchor(titleLink) : clean(text).split(' ').slice(0, 12).join(' ');
-        const netflixId = titleLink ? netflixIdFromHref(titleLink.getAttribute('href')) : null;
-        if (!title || title === watchedAt) continue;
-        const key = `${netflixId || title}|${watchedAt || ''}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        items.push({ title, netflixId, watchedAt });
-        if (items.length >= 500) break;
-      }
+    return items;
+  }
+
+  function collectViewing(doc) {
+    if (isSignedOut(doc)) return { error: 'Sign in to Netflix in this browser, then export again.', items: [] };
+    const modern = collectModernViewing(doc);
+    if (modern.length > 0 || doc.querySelector('[data-uia="viewing-activity-page+container"]')) {
+      return { items: modern };
+    }
+    const items = [];
+    const seen = new Set();
+    const legacyRows = doc.querySelectorAll('.retableRow, [data-list-item]');
+    const anchors = legacyRows.length
+      ? [...legacyRows].flatMap((row) => [...row.querySelectorAll('a[href*="/title/"], a[href*="/watch/"]')])
+      : titleAnchors(doc);
+    for (const anchor of anchors) {
+      const netflixId = netflixIdFromHref(anchor.getAttribute('href'));
+      const title = titleFromAnchor(anchor);
+      const item = viewingItem(title, netflixId, dateFromScope(rowFor(anchor)));
+      if (!item) continue;
+      const key = `${item.netflixId}|${item.watchedAt || ''}|${item.title}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push(item);
+      if (items.length >= 500) break;
     }
     return { items };
   }
 
+  function hasViewingRow(doc) {
+    return Boolean(doc.querySelector('[data-uia="viewing-activity-page+list-item"], .retableRow a[href*="/title/"], .retableRow a[href*="/watch/"]'));
+  }
+
   function findShowMore(doc) {
+    const exact = doc.querySelector('button[data-uia="viewing-activity-page+show-more-btn"], button[data-cl-command="ShowMoreCommand"]');
+    if (exact && !exact.disabled && exact.getAttribute('aria-disabled') !== 'true' && !exact.hidden) return exact;
     const nodes = doc.querySelectorAll('button, a, [role="button"]');
     for (const node of nodes) {
       if (node.disabled || node.getAttribute('aria-disabled') === 'true' || node.classList.contains('disabled')) continue;
@@ -190,6 +228,24 @@
     });
   }
 
+  function waitForViewingRow(doc, timeoutMs) {
+    if (hasViewingRow(doc)) return Promise.resolve();
+    const body = doc.body || doc.documentElement;
+    if (!body || typeof MutationObserver === 'undefined') return sleep(timeoutMs);
+    return new Promise((resolve) => {
+      const observer = new MutationObserver(() => {
+        if (!hasViewingRow(doc)) return;
+        observer.disconnect();
+        resolve();
+      });
+      observer.observe(body, { childList: true, subtree: true, characterData: true });
+      setTimeout(() => {
+        observer.disconnect();
+        resolve();
+      }, timeoutMs);
+    });
+  }
+
   async function expandAndCollect(doc, kind, options) {
     const settings = options || {};
     const collect = kind === 'myList' ? collectMyList : collectViewing;
@@ -198,7 +254,10 @@
     const settleMs = settings.settleMs ?? 2500;
     let stagnant = 0;
     let clicks = 0;
-    let latest = await waitForCount(doc, collect, -1, settings.initialWaitMs ?? 8000);
+    if (kind !== 'myList') await waitForViewingRow(doc, settings.initialWaitMs ?? 20000);
+    let latest = kind === 'myList'
+      ? await waitForCount(doc, collect, -1, settings.initialWaitMs ?? 4000)
+      : collect(doc);
     if (latest.error) return { ...latest, clicks };
     if (settings.onProgress) settings.onProgress(latest.items.length, clicks);
     while (clicks < maxClicks) {

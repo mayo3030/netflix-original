@@ -1,6 +1,6 @@
 body {
   margin: 0;
-  width: 280px;
+  width: 320px;
   padding: 16px;
   background: #090a0e;
   color: #f6f1e7;
@@ -22,4 +22,5 @@ button {
 }
 button:disabled { opacity: 0.6; cursor: progress; }
 .fine, #status { color: #c0b6aa; font-size: 12px; }
-#status { white-space: pre-wrap; max-height: 180px; overflow: auto; }
+#summary { color: #f6f1e7; font-size: 15px; font-weight: 700; white-space: pre-wrap; }
+#status { white-space: pre-wrap; max-height: 140px; overflow: auto; }

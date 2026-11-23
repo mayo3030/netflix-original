@@ -78,7 +78,9 @@ async function matchOne(
   budget: { left: number },
   signal: AbortSignal,
 ): Promise<MatchedTitle> {
-  const { query, preferTv } = searchQueryFromNetflixTitle(entry.title);
+  const searched = searchQueryFromNetflixTitle(entry.showTitle || entry.title);
+  const query = entry.showTitle || searched.query;
+  const preferTv = Boolean(entry.showTitle) || searched.preferTv;
   const demo = findDemo(query) ?? findDemo(entry.title);
   if (demo) return { title: { ...demo, netflixId: entry.netflixId }, kind: 'demo' };
   if (!tmdbConfigured() || budget.left <= 0) return { title: nameCard(entry, kind), kind: 'name' };

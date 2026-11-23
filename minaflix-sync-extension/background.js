@@ -75,8 +75,8 @@ async function callPage(tabId, kind) {
       return api.expandAndCollect(document, section, {
         delayMs: 900,
         settleMs: 2500,
-        initialWaitMs: 12000,
-        maxClicks: 80,
+        initialWaitMs: section === 'myList' ? 4000 : 20000,
+        maxClicks: section === 'myList' ? 20 : 80,
         onProgress: report,
       });
     },
@@ -177,9 +177,7 @@ async function exportAccount(port, isActive) {
     return;
   }
 
-  const problem = errors.length ? ` ${errors.map((item) => item.message).join(' ')}` : '';
-  send({
-    type: 'done',
-    text: `Saved ${myList.length} My List titles and ${viewingActivity.length} watched titles.${problem}`,
-  });
+  const summary = `Exported ${viewingActivity.length} watched, ${myList.length} My List`;
+  const problem = errors.length ? `\n${errors.map((item) => item.message).join(' ')}` : '';
+  send({ type: 'done', text: `${summary}${problem}` });
 }

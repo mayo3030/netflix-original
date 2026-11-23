@@ -1,5 +1,6 @@
 export type NetflixEntry = {
   title: string;
+  showTitle: string | null;
   netflixId: string | null;
   watchedAt: string | null;
 };
@@ -66,11 +67,18 @@ export function netflixTitleUrl(netflixId: string): string {
   return `https://www.netflix.com/title/${netflixId}`;
 }
 
-function entry(title: string, netflixId: string | null, watchedAt: string | null): NetflixEntry | null {
+export function showTitleFrom(title: string): string | null {
+  const match = /^(.*?)\s*:\s*Season\b/i.exec(title);
+  const name = match?.[1]?.trim() ?? '';
+  return name && name !== title ? name : null;
+}
+
+function entry(title: string, netflixId: string | null, watchedAt: string | null, showTitle?: string | null): NetflixEntry | null {
   const name = title.replace(/\s+/g, ' ').trim();
   if (!name) return null;
   const id = netflixId && /^\d{1,12}$/.test(netflixId) ? netflixId : null;
-  return { title: name.slice(0, 180), netflixId: id, watchedAt: normalizeWatchedAt(watchedAt) };
+  const cleaned = typeof showTitle === 'string' && showTitle.trim() ? showTitle.trim() : showTitleFrom(name);
+  return { title: name.slice(0, 180), showTitle: cleaned, netflixId: id, watchedAt: normalizeWatchedAt(watchedAt) };
 }
 
 function take(entries: NetflixEntry[]): NetflixEntry[] {
@@ -150,12 +158,13 @@ function readJsonEntries(value: unknown, requireId: boolean): NetflixEntry[] {
   const entries: NetflixEntry[] = [];
   for (const item of value) {
     if (!item || typeof item !== 'object') continue;
-    const record = item as { title?: unknown; netflixId?: unknown; watchedAt?: unknown };
+    const record = item as { title?: unknown; showTitle?: unknown; netflixId?: unknown; watchedAt?: unknown };
     if (typeof record.title !== 'string') continue;
     const id = typeof record.netflixId === 'string' ? record.netflixId : null;
     if (requireId && !id) continue;
     const watched = typeof record.watchedAt === 'string' ? record.watchedAt : null;
-    const next = entry(record.title, id, watched);
+    const showTitle = typeof record.showTitle === 'string' ? record.showTitle : null;
+    const next = entry(record.title, id, watched, showTitle);
     if (next) entries.push(next);
   }
   return take(entries);

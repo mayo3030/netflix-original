@@ -30,7 +30,7 @@ describe('parseViewingActivityCsv', () => {
   it('reads the simple Title,Date download', () => {
     const entries = parseViewingActivityCsv('Title,Date\nSintel,1/5/24\n');
     expect(entries).toEqual([
-      { title: 'Sintel', netflixId: null, watchedAt: '2024-01-05' },
+      { title: 'Sintel', showTitle: null, netflixId: null, watchedAt: '2024-01-05' },
     ]);
   });
 
@@ -41,7 +41,8 @@ describe('parseViewingActivityCsv', () => {
       'Home,2020-01-08 01:00:00,00:40:00,,"Lantern Gate: Season 1: ""Pilot""",TV',
     ].join('\n');
     const entries = parseViewingActivityCsv(csv);
-    expect(entries[0]).toEqual({ title: 'Tears of Steel', netflixId: null, watchedAt: '2024-11-02' });
+    expect(entries[0]).toEqual({ title: 'Tears of Steel', showTitle: null, netflixId: null, watchedAt: '2024-11-02' });
+    expect(entries[1]?.showTitle).toBe('Lantern Gate');
     expect(entries[1]?.title).toBe('Lantern Gate: Season 1: "Pilot"');
     expect(entries[1]?.watchedAt).toBe('2020-01-08');
   });
@@ -64,7 +65,7 @@ describe('parseMinaflixExport', () => {
       myList: [{ title: 'Sintel', netflixId: '80000001' }],
       viewingActivity: [{ title: 'Tears of Steel', netflixId: '70248183', watchedAt: '2024-11-02' }],
     }));
-    expect(lists.myList).toEqual([{ title: 'Sintel', netflixId: '80000001', watchedAt: null }]);
+    expect(lists.myList).toEqual([{ title: 'Sintel', showTitle: null, netflixId: '80000001', watchedAt: null }]);
     expect(lists.viewingActivity?.[0]?.watchedAt).toBe('2024-11-02');
   });
 
@@ -80,7 +81,7 @@ describe('parseMinaflixExport', () => {
       myList: [{ title: '   ' }, { title: 'Named only', netflixId: 'nope' }, { watchedAt: '2024-01-01' }],
       viewingActivity: [],
     }));
-    expect(lists.myList).toEqual([{ title: 'Named only', netflixId: null, watchedAt: null }]);
+    expect(lists.myList).toEqual([{ title: 'Named only', showTitle: null, netflixId: null, watchedAt: null }]);
   });
 });
 
@@ -115,9 +116,9 @@ describe('titles and dates', () => {
 
   it('dedupes by Netflix id and keeps the first row', () => {
     const unique = dedupeEntries([
-      { title: 'Sintel', netflixId: '1', watchedAt: '2024-01-01' },
-      { title: 'Sintel (again)', netflixId: '1', watchedAt: '2024-02-01' },
-      { title: 'Other', netflixId: null, watchedAt: null },
+      { title: 'Sintel', showTitle: null, netflixId: '1', watchedAt: '2024-01-01' },
+      { title: 'Sintel (again)', showTitle: null, netflixId: '1', watchedAt: '2024-02-01' },
+      { title: 'Other', showTitle: null, netflixId: null, watchedAt: null },
     ]);
     expect(unique.map((item) => item.title)).toEqual(['Sintel', 'Other']);
   });
