@@ -180,21 +180,61 @@ export function loadStoredCatalog(): StoredCatalog | null {
   }
 }
 
+function filledText(value: string | null | undefined): string | null | undefined {
+  return value && value.trim() ? value : null;
+}
+
+function filledList(value: string[] | undefined): string[] | undefined {
+  return value && value.length ? value : undefined;
+}
+
+export function mergeCatalogTitle(current: CatalogTitle, incoming: CatalogTitle): CatalogTitle {
+  return {
+    ...incoming,
+    ...current,
+    title: titleRank(incoming.title) > titleRank(current.title) ? incoming.title : current.title,
+    synopsis: filledText(current.synopsis) || filledText(incoming.synopsis) || null,
+    image: current.image || incoming.image || null,
+    backdrop: current.backdrop || incoming.backdrop || null,
+    year: filledText(current.year) || filledText(incoming.year) || null,
+    maturity: filledText(current.maturity) || filledText(incoming.maturity) || null,
+    genres: filledList(current.genres) || filledList(incoming.genres) || [],
+    cast: filledList(current.cast) || filledList(incoming.cast) || [],
+    creators: filledList(current.creators) || filledList(incoming.creators) || [],
+    directors: filledList(current.directors) || filledList(incoming.directors) || [],
+    runtimeMinutes: current.runtimeMinutes ?? incoming.runtimeMinutes ?? null,
+    seasons: current.seasons ?? incoming.seasons ?? null,
+    mediaType: current.mediaType || incoming.mediaType || null,
+    trailerYoutubeId: current.trailerYoutubeId || incoming.trailerYoutubeId || null,
+    trailerTitle: filledText(current.trailerTitle) || filledText(incoming.trailerTitle) || null,
+    trailerChannel: filledText(current.trailerChannel) || filledText(incoming.trailerChannel) || null,
+    detailSource: current.detailSource || incoming.detailSource || null,
+  };
+}
+
 export function mergeStoredCatalog(next: StoredCatalog): StoredCatalog {
   const current = loadStoredCatalog();
-  const rows = [...(current?.rows ?? [])];
+  const rows = (current?.rows ?? []).map((row) => ({ ...row, titles: [...row.titles] }));
+  const located = new Map<string, { row: number; title: number }>();
+  rows.forEach((row, rowIndex) => {
+    row.titles.forEach((title, titleIndex) => {
+      if (title.netflixId && !located.has(title.netflixId)) located.set(title.netflixId, { row: rowIndex, title: titleIndex });
+    });
+  });
   for (const row of next.rows) {
-    const existing = rows.find((item) => item.name === row.name);
-    if (!existing) {
-      rows.push(row);
-      continue;
+    let rowIndex = rows.findIndex((item) => item.name === row.name);
+    if (rowIndex < 0) {
+      rows.push({ name: row.name, titles: [] });
+      rowIndex = rows.length - 1;
     }
-    const seen = new Set(existing.titles.map((item) => item.netflixId || item.title));
     for (const title of row.titles) {
-      const key = title.netflixId || title.title;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      existing.titles.push(title);
+      const place = title.netflixId ? located.get(title.netflixId) : undefined;
+      if (place) {
+        rows[place.row].titles[place.title] = mergeCatalogTitle(rows[place.row].titles[place.title], title);
+        continue;
+      }
+      rows[rowIndex].titles.push(title);
+      if (title.netflixId) located.set(title.netflixId, { row: rowIndex, title: rows[rowIndex].titles.length - 1 });
     }
   }
   const stored = { rows };

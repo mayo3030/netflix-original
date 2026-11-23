@@ -451,39 +451,70 @@ describe('live title details', () => {
     });
   });
 
-  it('asks unifiedEntities for details and does not query the missing video field', async () => {
+  it('builds a detail query only from fields present in the graphql cache', async () => {
     const dom = page('', 'https://www.netflix.com/browse');
     const api = dom.window.MinaflixScrape;
-    const query = api.rawDetailQuery(['81486332']);
+    const cache = {
+      data: {
+        ROOT_QUERY: {
+          'unifiedEntities({"unifiedEntityIds":["Video:81486332"],"context":{"clientApp":"browse"}})': [],
+        },
+        'Show:81486332': {
+          __typename: 'Show',
+          title: 'Heartland',
+          synopsis: 'Amy heals horses and the people around them.',
+          shortSynopsis: { text: 'Amy heals horses.' },
+          contextualSynopsis: { __ref: 'ContextualSynopsis:1' },
+        },
+        'ContextualSynopsis:1': { text: 'Amy heals horses and the people around them.' },
+      },
+    };
+    const query = api.rawDetailQuery(['81486332'], cache);
     expect(query).toContain('unifiedEntities');
+    expect(query).toContain('context:');
+    expect(query).toContain('clientApp');
     expect(query).toContain('... on Show');
-    expect(query).toContain('... on Movie');
+    expect(query).toContain('synopsis');
+    expect(query).toContain('shortSynopsis { text }');
     expect(query).toContain('contextualSynopsis { text }');
-    expect(query).toContain('cast { name }');
-    expect(query).toContain('directors { name }');
-    expect(query.split('... on')[0]).not.toMatch(/\bvideoId\b/);
-    expect(query).not.toMatch(/\bvideo\s*\(/);
-    expect(query).not.toMatch(/license|manifest|playback|drm|promoVideo/i);
+    expect(query).not.toMatch(/\bvideoId\b|\bnumSeasons\b|\bgenreTags\b|\bmoodTags\b|\bcast\b/);
+    expect(query).not.toMatch(/\bvideo\s*\(|license|manifest|playback|drm|promoVideo/i);
+    expect(api.rawDetailQuery(['81486332'])).toBeNull();
+    dom.window.netflix = { reactContext: { models: { graphql: cache } } };
     const calls = [];
     dom.window.fetch = async (_url, options) => {
-      const body = JSON.parse(options.body);
-      calls.push(body);
+      calls.push(JSON.parse(options.body));
       return {
         ok: false,
         status: 400,
-        text: async () => JSON.stringify({ errors: [{ message: "Validation error (FieldUndefined@[video]) : Field 'video' in type 'Query' is undefined" }] }),
+        text: async () => JSON.stringify({ errors: [{ message: 'Validation error of type FieldUndefined' }] }),
       };
     };
     const failed = await api.fetchGraphqlDetails(dom.window, ['81486332']);
     expect(calls).toHaveLength(1);
-    expect(calls[0].query).not.toMatch(/\bvideo\s*\(/);
+    expect(calls[0].query).toContain('context:');
+    expect(calls[0].query).not.toMatch(/\bnumSeasons\b|\bgenreTags\b|\bcast\b/);
     expect(failed.byId).toEqual({});
-    expect(failed.error).toMatch(/FieldUndefined|undefined/);
+    expect(failed.error).toMatch(/FieldUndefined/);
   });
 
   it('reads a unifiedEntities response', async () => {
     const dom = page('', 'https://www.netflix.com/browse');
     const api = dom.window.MinaflixScrape;
+    dom.window.netflix = {
+      reactContext: {
+        models: {
+          graphql: {
+            data: {
+              ROOT_QUERY: {
+                'unifiedEntities({"unifiedEntityIds":["Video:81486332"],"context":{"clientApp":"browse"}})': [],
+              },
+              'Show:81486332': { __typename: 'Show', title: 'Heartland', synopsis: 'Amy heals horses and the people around them.' },
+            },
+          },
+        },
+      },
+    };
     dom.window.fetch = async () => ({
       ok: true,
       status: 200,

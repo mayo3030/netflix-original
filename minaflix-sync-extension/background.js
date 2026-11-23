@@ -7,7 +7,8 @@ try {
 const MY_LIST_URL = 'https://www.netflix.com/browse/my-list';
 const ACTIVITY_URL = 'https://www.netflix.com/viewingactivity';
 const ACTIVITY_PATHS = ['/viewingactivity', '/settings/viewed', '/moviesyouveseen'];
-const NAV_TIMEOUT_MS = 45000;
+const CATALOG_JOB = 'minaflix.catalog.job.v1';
+const NAV_TIMEOUT_MS = 90000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -47,7 +48,7 @@ async function navigate(tabId, accept) {
   throw new Error(`Netflix took too long to load. Last page: ${lastUrl || 'unknown'}`);
 }
 
-async function openAndGo(url, accept) {
+async function openAndGoOnce(url, accept) {
   const tabs = await chrome.tabs.query({ url: ['https://www.netflix.com/*', 'https://netflix.com/*'] });
   const current = tabs.find((tab) => typeof tab.id === 'number');
   const tabId = current && typeof current.id === 'number'
@@ -57,6 +58,21 @@ async function openAndGo(url, accept) {
   await chrome.tabs.update(tabId, { url, active: true });
   const finalUrl = await navigate(tabId, accept);
   return { tabId, finalUrl };
+}
+
+async function openAndGo(url, accept) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await openAndGoOnce(url, accept);
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt === 1 || !/took too long|failed to fetch/i.test(message)) throw error;
+      await sleep(2000);
+    }
+  }
+  throw lastError;
 }
 
 async function callPage(tabId, kind) {
@@ -208,8 +224,6 @@ chrome.runtime.onStartup.addListener(() => {
   void ensureCatalog({ resume: true });
 });
 
-void ensureCatalog({ resume: true });
-
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'minaflix-export') return;
   activePort = port;
@@ -332,8 +346,6 @@ async function exportAccount(port, isActive) {
   send({ type: 'done', text: `${summary}${problem}` });
 }
 
-const CATALOG_JOB = 'minaflix.catalog.job.v1';
-
 async function readCatalogJob() {
   const stored = await chrome.storage.local.get(CATALOG_JOB);
   return stored[CATALOG_JOB] || null;
@@ -343,7 +355,7 @@ async function writeCatalogJob(job) {
   await chrome.storage.local.set({ [CATALOG_JOB]: { ...job, updatedAt: new Date().toISOString() } });
 }
 
-async function pageCall(tabId, payload) {
+async function pageCallOnce(tabId, payload) {
   await chrome.scripting.executeScript({ target: { tabId }, files: ['scrape.js'], world: 'MAIN' });
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
@@ -356,18 +368,18 @@ async function pageCall(tabId, payload) {
       if (request.op === 'lolomo') {
         const ctx = api.readMemberApi(globalThis.netflix?.reactContext || globalThis.netflix?.appContext);
         if (!ctx) return { rows: [] };
-        const response = await fetch(api.memberApiUrl(ctx), {
+        const response = await api.fetchWithRetry(api.memberApiUrl(ctx), {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'content-type': 'application/json', accept: 'application/json' },
           body: JSON.stringify({ paths: api.catalogPaths(request.from, request.to, 30), authURL: ctx.authURL }),
         });
-        if (!response.ok) return { rows: [] };
+        if (!response?.ok) return { rows: [] };
         return { rows: api.rowsFromLolomo(await response.json()) };
       }
       if (request.op === 'html') {
-        const response = await fetch(request.url, { credentials: 'same-origin' });
-        if (!response.ok) return { rows: [], genres: [] };
+        const response = await api.fetchWithRetry(request.url, { credentials: 'same-origin' });
+        if (!response?.ok) return { rows: [], genres: [] };
         return api.rowsFromBrowseHtml(await response.text());
       }
       if (request.op === 'details') return api.fetchMemberMetadata(globalThis, request.ids);
@@ -379,6 +391,21 @@ async function pageCall(tabId, payload) {
     },
   });
   return result?.result;
+}
+
+async function pageCall(tabId, payload) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await pageCallOnce(tabId, payload);
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt === 2 || !/failed to fetch|network/i.test(message)) throw error;
+      await sleep(800 * (attempt + 1));
+    }
+  }
+  throw lastError;
 }
 
 function sectionHeading(value) {
@@ -452,20 +479,37 @@ async function applyTrailers(job, send) {
     const info = titles.get(id);
     send({ type: 'progress', text: `Trailers ${found}. Looking up ${info.title}…` });
     try {
-      const response = await fetch(globalThis.MinaflixYoutube.youtubeSearchUrl(info.title, info.year), {
-        credentials: 'omit',
-        headers: { accept: 'text/html' },
-      });
-      const html = response.ok ? await response.text() : '';
-      const trailer = html ? globalThis.MinaflixYoutube.pickTrailer(html, info.title) : null;
-      job.trailers[id] = trailer || { trailerYoutubeId: null, trailerTitle: null, trailerChannel: null };
-      if (!html.includes('ytInitialData') && !reportedEmpty) {
-        reportedEmpty = true;
-        job.errors.push({ section: 'trailers', message: `YouTube returned no search data for ${info.title} (HTTP ${response.status}).` });
+      let html = '';
+      let status = 0;
+      let lookupError = '';
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const response = await fetch(globalThis.MinaflixYoutube.youtubeSearchUrl(info.title, info.year), {
+            credentials: 'omit',
+            headers: { accept: 'text/html' },
+          });
+          status = response.status;
+          html = response.ok ? await response.text() : '';
+          lookupError = response.ok ? '' : `HTTP ${response.status}`;
+          if (response.ok) break;
+        } catch (error) {
+          lookupError = error instanceof Error ? error.message : 'Failed to fetch';
+          html = '';
+        }
+        await sleep(700 * (attempt + 1));
       }
-      if (trailer?.trailerYoutubeId) found += 1;
+      if (!html) {
+        job.errors.push({ section: 'trailers', id, message: lookupError || `YouTube lookup failed for ${info.title}` });
+      } else {
+        const trailer = globalThis.MinaflixYoutube.pickTrailer(html, info.title);
+        job.trailers[id] = trailer || { trailerYoutubeId: null, trailerTitle: null, trailerChannel: null };
+        if (!html.includes('ytInitialData') && !reportedEmpty) {
+          reportedEmpty = true;
+          job.errors.push({ section: 'trailers', message: `YouTube returned no search data for ${info.title} (HTTP ${status}).` });
+        }
+        if (trailer?.trailerYoutubeId) found += 1;
+      }
     } catch (error) {
-      job.trailers[id] = { trailerYoutubeId: null, trailerTitle: null, trailerChannel: null };
       job.errors.push({ section: 'trailers', id, message: error instanceof Error ? error.message : 'YouTube lookup failed' });
     }
     await writeCatalogJob(job);
@@ -687,7 +731,7 @@ async function readModalDetail(tabId, id, title) {
   try {
     await chrome.tabs.update(tabId, { url: `https://www.netflix.com/browse?jbv=${id}`, active: true });
     await navigate(tabId, (url) => String(url).includes(`jbv=${id}`) || String(url).includes('/browse'));
-    await sleep(800);
+    await sleep(1500);
     const opened = await pageCall(tabId, { op: 'modal-read', id, title });
     return opened?.meta ? opened : { error: opened?.error || result?.error || 'preview modal was not readable after navigation' };
   } catch (error) {
@@ -709,7 +753,11 @@ async function applyModalDetails(tabId, job, send) {
     const id = list.shift();
     if (!fromGraphqlMiss) job.detailAttempts += 1;
     send({ type: 'progress', text: `Modal for ${id}. ${pathSummary(job)}. ${list.length} left.` });
-    const result = await readModalDetail(tabId, id, cardTitleFor(job, id));
+    let result = await readModalDetail(tabId, id, cardTitleFor(job, id));
+    if (!result?.meta) {
+      await sleep(1500);
+      result = await readModalDetail(tabId, id, cardTitleFor(job, id));
+    }
     if (result?.meta) {
       rememberDetail(job, id, result.meta);
       streak = 0;
@@ -719,8 +767,8 @@ async function applyModalDetails(tabId, job, send) {
       const message = result?.error || 'preview modal had no details';
       job.errors.push({ section: 'details', id, path: 'modal', message });
       send({ type: 'progress', text: `Modal ${id}: ${message}` });
-      if (streak >= 2 && !job.paths.modal) {
-        const stop = 'Stopped modal lookups after 2 titles opened no details. Card images stay in the export.';
+      if (streak >= 15 && !job.paths.modal) {
+        const stop = 'Stopped modal lookups after 15 titles opened no details. Card images stay in the export.';
         job.errors.push({ section: 'details', path: 'modal', message: stop });
         send({ type: 'progress', text: stop });
         job.pending = [];
@@ -729,7 +777,7 @@ async function applyModalDetails(tabId, job, send) {
       }
     }
     await writeCatalogJob(job);
-    if (job.pending.length || job.forModal.length) await sleep(1500);
+    if (job.pending.length || job.forModal.length) await sleep(1500 + Math.min(streak, 6) * 700);
   }
 }
 
@@ -811,3 +859,5 @@ async function syncCatalog(message) {
     send({ type: 'error', text: error instanceof Error ? error.message : 'Catalog sync failed. Open the extension again to resume.' });
   }
 }
+
+void ensureCatalog({ resume: true });

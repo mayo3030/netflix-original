@@ -52,6 +52,14 @@ describe('youtube trailers', () => {
     expect(api.isOfficialChannel('Random Clips')).toBe(false);
   });
 
+  it('keeps the first title-and-trailer result when the official channel names a different video', () => {
+    const picked = api.pickTrailer(page([
+      { id: 'ddddddddddd', title: 'Heartland Trailer', channel: 'Clips' },
+      { id: 'eeeeeeeeeee', title: 'Official Trailer', channel: 'Netflix' },
+    ]), 'Heartland');
+    expect(picked.trailerYoutubeId).toBe('ddddddddddd');
+  });
+
   it('uses a title that names the show and Trailer when no official channel is present', () => {
     const picked = api.pickTrailer(page([
       { id: 'ccccccccccc', title: 'Morning cooking', channel: 'Food' },

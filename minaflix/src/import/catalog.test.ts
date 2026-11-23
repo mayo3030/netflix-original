@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { catalogRows, heroKickerKey, parseCatalogFile, titleFromCatalog } from './catalog';
+import { describe, expect, it, vi } from 'vitest';
+import { catalogRows, heroKickerKey, mergeStoredCatalog, parseCatalogFile, titleFromCatalog } from './catalog';
 
 describe('parseCatalogFile', () => {
   it('reads a catalog export into renderable titles', () => {
@@ -101,5 +101,57 @@ describe('parseCatalogFile', () => {
     expect(blacklist.every((title) => title.title === 'The Blacklist')).toBe(true);
     expect(catalog.rows[2]?.titles[0]?.title).toBe('Animals');
     expect(catalog.rows[3]?.titles[0]?.title).toBe('More Like This');
+  });
+
+  it('keeps stored details when a later catalog import leaves them empty', () => {
+    const memory = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => memory.get(key) ?? null,
+      setItem: (key: string, value: string) => { memory.set(key, value); },
+      removeItem: (key: string) => { memory.delete(key); },
+    });
+    mergeStoredCatalog(parseCatalogFile(JSON.stringify({
+      kind: 'catalog',
+      rows: [{
+        name: 'Drama',
+        titles: [{
+          title: 'Heartland',
+          netflixId: '81486332',
+          synopsis: 'Amy heals horses and the people around them.',
+          image: 'https://occ-0-1.nflxso.net/boxart.jpg',
+          backdrop: 'https://occ-0-1.nflxso.net/story.jpg',
+          year: '2007',
+          maturity: 'TV-14',
+          genres: ['Drama'],
+          cast: ['Amber Marshall'],
+          trailerYoutubeId: 'abcdefghijk',
+        }],
+      }],
+    })));
+    const merged = mergeStoredCatalog(parseCatalogFile(JSON.stringify({
+      kind: 'catalog',
+      rows: [{
+        name: 'Drama',
+        titles: [{
+          title: 'Heartland',
+          netflixId: '81486332',
+          synopsis: '',
+          year: '',
+          maturity: '',
+          genres: [],
+          cast: [],
+          trailerYoutubeId: '',
+        }],
+      }],
+    })));
+    const title = merged.rows[0]?.titles[0];
+    expect(title?.synopsis).toContain('Amy heals horses');
+    expect(title?.cast).toEqual(['Amber Marshall']);
+    expect(title?.genres).toEqual(['Drama']);
+    expect(title?.backdrop).toBe('https://occ-0-1.nflxso.net/story.jpg');
+    expect(title?.year).toBe('2007');
+    expect(title?.maturity).toBe('TV-14');
+    expect(title?.trailerYoutubeId).toBe('abcdefghijk');
+    vi.unstubAllGlobals();
   });
 });

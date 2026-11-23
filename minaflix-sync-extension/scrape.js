@@ -735,27 +735,51 @@
     return parsed;
   }
 
+  function mergeBrowseRows(dom, cached) {
+    const rows = [];
+    const byName = new Map();
+    for (const source of [dom?.rows || [], cached?.rows || []]) {
+      for (const row of source) {
+        const name = row?.name;
+        if (!name) continue;
+        if (!byName.has(name)) {
+          const created = { name, titles: [] };
+          byName.set(name, created);
+          rows.push(created);
+        }
+        const bucket = byName.get(name);
+        const seen = new Set(bucket.titles.map((title) => title.netflixId));
+        for (const title of row.titles || []) {
+          if (!title?.netflixId || seen.has(title.netflixId)) continue;
+          seen.add(title.netflixId);
+          bucket.titles.push(title);
+        }
+      }
+    }
+    return {
+      rows,
+      genres: dom?.genres?.length ? dom.genres : (cached?.genres || []),
+    };
+  }
+
   async function collectLiveBrowse() {
     const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const images = new Map();
-    for (let step = 0; step < 5; step += 1) {
-      window.scrollBy(0, Math.max(500, window.innerHeight * 0.8));
-      await pause(350);
+    for (let step = 0; step < 12; step += 1) {
+      window.scrollBy(0, Math.max(700, window.innerHeight));
+      await pause(700);
       const buttons = [...document.querySelectorAll('[data-uia="carousel-hawkins-right-button"]')]
         .filter((button) => !button.disabled && button.getAttribute('tabindex') !== '-1');
-      for (const button of buttons.slice(0, 8)) {
+      for (const button of buttons) {
         button.click();
         await harvestVisibleCards(images);
-        await pause(200);
+        await pause(250);
       }
       await harvestVisibleCards(images);
     }
     const dom = applyHarvestedImages(rowsFromBrowseDocument(document), images);
     const cached = rowsFromGraphqlCache(graphqlCacheFromWindow(globalThis) || graphqlCacheFromHtml(document.documentElement.innerHTML));
-    return {
-      rows: dom.rows.length ? dom.rows : cached.rows,
-      genres: dom.genres.length ? dom.genres : cached.genres,
-    };
+    return mergeBrowseRows(dom, cached);
   }
 
   function diagnoseTitleHtml(html, finalUrl) {
@@ -779,7 +803,7 @@
       for (let start = 0; start < ids.length; start += 40) {
         const chunk = ids.slice(start, start + 40);
         try {
-          const response = await fetch(memberApiUrl(api), {
+          const response = await fetchWithRetry(memberApiUrl(api), {
             method: 'POST',
             credentials: 'same-origin',
             headers: { 'content-type': 'application/json', accept: 'application/json' },
@@ -1072,23 +1096,16 @@
     return match ? match[1] : null;
   }
 
-  const DETAIL_FIELD_NAMES = ['title', 'synopsis', 'contextualSynopsis', 'shortSynopsis', 'narrativeText', 'latestYear', 'releaseYear', 'year', 'runtimeSec', 'displayRuntime', 'seasonCount', 'numSeasons', 'numSeasonsLabel', 'seasons', 'contentAdvisory', 'genreTags', 'genres', 'moodTags', 'cast', 'actors', 'creators', 'directors', 'storyArt', 'boxArt'];
-
   function cacheRoot(cache) {
     const data = cache?.data || cache || {};
     return data.ROOT_QUERY || data['ROOT_QUERY'] || {};
   }
 
-  function observedTypeFields(cache) {
-    const data = cache?.data || cache || {};
-    const fields = {};
-    for (const [key, value] of Object.entries(data)) {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
-      const typeName = value.__typename || (/^(Show|Movie|Video|Episode|Series|Person|Genre|ContextualSynopsis)/.exec(key) || [])[1];
-      if (!typeName) continue;
-      fields[typeName] = [...new Set([...(fields[typeName] || []), ...Object.keys(value).filter((name) => name !== '__typename' && !name.startsWith('__'))])];
-    }
-    return fields;
+  function parseRootArguments(key) {
+    const text = String(key || '').trim().replace(/\)+$/, '');
+    const brace = text.indexOf('{');
+    if (brace < 0) return null;
+    try { return JSON.parse(text.slice(brace)); } catch { return null; }
   }
 
   function unifiedCall(cache) {
@@ -1096,67 +1113,78 @@
     for (const key of Object.keys(root)) {
       const field = key.split(/[:(]/)[0];
       if (!/unifiedEntit/i.test(field)) continue;
-      const args = /[:(](\{.*\})\)?$/.exec(key);
-      let argName = 'unifiedEntityIds';
-      try {
-        const parsed = JSON.parse(args?.[1] || '');
-        argName = Object.keys(parsed)[0] || argName;
-      } catch {
-        // The default argument matches the field that rejected videoId.
-      }
-      return { field, argName, sample: parsed };
+      return { field, sample: parseRootArguments(key) };
     }
-    return { field: 'unifiedEntities', argName: 'unifiedEntityIds', sample: null };
+    return null;
   }
 
-  function entityIdVariables(ids, sample) {
-    const value = sample && typeof sample === 'object' ? Object.values(sample)[0] : null;
-    const first = Array.isArray(value) ? value[0] : value;
-    if (typeof first === 'number') return ids.map((id) => Number(id));
-    if (typeof first === 'string' && /^\d+$/.test(first)) return ids.map(String);
+  function idArgument(sample) {
+    if (!sample || typeof sample !== 'object') return { name: 'unifiedEntityIds', example: null };
+    for (const [key, value] of Object.entries(sample)) {
+      if (key === 'context') continue;
+      const list = Array.isArray(value) ? value : [value];
+      if (list.some((item) => typeof item === 'string' || typeof item === 'number')) return { name: key, example: list.find((item) => item != null) };
+    }
+    return { name: 'unifiedEntityIds', example: null };
+  }
+
+  function entityIdVariables(ids, example) {
+    if (typeof example === 'number') return ids.map((id) => Number(id));
+    if (typeof example === 'string' && /^\d+$/.test(example)) return ids.map(String);
     return ids.map((id) => `Video:${id}`);
   }
 
-  function selectionFor(fieldName) {
-    if (/play|manifest|license|drm|stream|promoVideo|viewable/i.test(fieldName)) return '';
-    const nested = {
-      contextualSynopsis: ['text'],
-      shortSynopsis: ['text'],
-      narrativeText: ['text'],
-      contentAdvisory: ['certificationValue'],
-      genreTags: ['name'],
-      genres: ['name'],
-      moodTags: ['displayName'],
-      cast: ['name'],
-      actors: ['name'],
-      creators: ['name'],
-      directors: ['name'],
-      seasons: ['totalCount'],
-      storyArt: ['url'],
-      boxArt: ['url'],
-    }[fieldName];
-    return nested ? `${fieldName} { ${nested.join(' ')} }` : fieldName;
+  function graphqlLiteral(value) {
+    if (value == null) return 'null';
+    if (typeof value === 'string') return JSON.stringify(value);
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (Array.isArray(value)) return `[${value.map((item) => graphqlLiteral(item)).join(', ')}]`;
+    if (typeof value !== 'object') return 'null';
+    return `{ ${Object.entries(value).map(([key, item]) => `${key}: ${graphqlLiteral(item)}`).join(', ')} }`;
   }
 
-  function fragmentSelections(typeName) {
-    const movieSkip = new Set(['seasonCount', 'numSeasons', 'numSeasonsLabel', 'seasons']);
-    return DETAIL_FIELD_NAMES.filter((name) => typeName !== 'Movie' || !movieSkip.has(name)).map((name) => selectionFor(name)).filter(Boolean);
+  function selectionFromSample(name, sample, data, depth) {
+    if (!name || depth > 3 || /play|manifest|license|drm|stream|promoVideo|viewable/i.test(name)) return '';
+    let value = Array.isArray(sample) ? sample.find(Boolean) : sample;
+    if (value && typeof value === 'object' && typeof value.__ref === 'string') value = data?.[value.__ref];
+    if (value == null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return name;
+    if (typeof value !== 'object') return '';
+    const nested = Object.keys(value)
+      .filter((key) => key !== '__typename' && !key.startsWith('__'))
+      .map((key) => selectionFromSample(key, value[key], data, depth + 1))
+      .filter(Boolean);
+    return nested.length ? `${name} { ${nested.join(' ')} }` : '';
   }
 
   function unifiedDetailQuery(ids, cache) {
-    const types = observedTypeFields(cache);
-    const extras = ['Video', 'Series', 'Episode'].filter((typeName) => types[typeName]);
-    const useTypes = ['Show', 'Movie', ...extras];
-    const fragments = useTypes.map((typeName) => `... on ${typeName} { ${fragmentSelections(typeName).join(' ')} }`);
+    const data = cache?.data || cache || {};
     const call = unifiedCall(cache);
+    if (!call?.sample) return null;
+    const grouped = {};
+    for (const [key, value] of Object.entries(data)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const typeName = value.__typename || (/^(Show|Movie|Video|Episode|Series)/.exec(key) || [])[1];
+      if (!typeName || typeName === 'Query') continue;
+      grouped[typeName] = grouped[typeName] || [];
+      grouped[typeName].push(value);
+    }
+    const fragments = Object.entries(grouped).map(([typeName, entities]) => {
+      const names = [...new Set(entities.flatMap((entity) => Object.keys(entity).filter((name) => name !== '__typename' && !name.startsWith('__'))))];
+      const selections = names.map((name) => selectionFromSample(name, entities.find((entity) => entity[name] != null)?.[name], data, 0)).filter(Boolean);
+      return selections.length ? `... on ${typeName} { ${selections.join(' ')} }` : '';
+    }).filter(Boolean);
+    if (!fragments.length) return null;
+    const idArg = idArgument(call.sample);
+    const args = [`${idArg.name}: $ids`];
+    if (call.sample.context && typeof call.sample.context === 'object') args.push(`context: ${graphqlLiteral(call.sample.context)}`);
     return {
-      query: `query MinaflixDetails($ids: [ID!]!) { ${call.field}(${call.argName}: $ids) { __typename unifiedEntityId ${fragments.join(' ')} } }`,
-      variables: { ids: entityIdVariables(ids, call.sample) },
+      query: `query MinaflixDetails($ids: [ID!]!) { ${call.field}(${args.join(', ')}) { __typename ${fragments.join(' ')} } }`,
+      variables: { ids: entityIdVariables(ids, idArg.example) },
     };
   }
 
-  function rawDetailQuery(ids) {
-    return unifiedDetailQuery(ids).query;
+  function rawDetailQuery(ids, cache) {
+    return unifiedDetailQuery(ids, cache)?.query || null;
   }
 
   function detailModalBody(id, queryId) {
@@ -1214,9 +1242,22 @@
     return next === query ? '' : next.replace(/\s{2,}/g, ' ').trim();
   }
 
+  async function fetchWithRetry(url, options) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await fetch(url, options);
+      } catch (error) {
+        lastError = error;
+        await sleep(700 * (attempt + 1));
+      }
+    }
+    throw lastError;
+  }
+
   async function postGraphql(endpoint, body) {
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetchWithRetry(endpoint, {
         method: 'POST',
         credentials: 'include',
         mode: 'cors',
@@ -1272,7 +1313,12 @@
     if (!list.length) return publishDetails('graphql', byId, null);
     for (let start = 0; start < list.length; start += 8) {
       const chunk = list.slice(start, start + 8);
-      const posted = await postAdaptive(endpoint, unifiedDetailQuery(chunk, cache));
+      const request = unifiedDetailQuery(chunk, cache);
+      if (!request) {
+        notes.push('graphql cache did not include detail fields or a context argument');
+        break;
+      }
+      const posted = await postAdaptive(endpoint, request);
       if (posted.ok) Object.assign(byId, keepWanted(parseGraphqlDetails(posted.json), chunk));
       else if (posted.error) notes.push(posted.error);
       if (!posted.ok && !Object.keys(byId).length) break;
@@ -1443,11 +1489,15 @@
   function modalMatches(doc, id, expectedTitle) {
     const modal = findPreviewModal(doc);
     if (!modal || !/^\d{1,12}$/.test(String(id || ''))) return false;
+    const url = doc.defaultView?.location?.href || '';
+    if (new RegExp(`[?&]jbv=${id}(?:&|$)`).test(url)) return true;
+    const header = modal.querySelector(`[class*="titleTreatment"] a[href*="jbv=${id}"], [class*="player"] a[href*="jbv=${id}"]`);
+    if (header) return true;
     const found = modalVideoId(modal);
-    if (found) return found === String(id);
+    if (found && found !== String(id)) return false;
+    if (found === String(id)) return true;
     const logo = logoTitle(modal);
-    const urlOk = new RegExp(`(?:[?&]jbv=|/title/|/watch/)${id}(?:\\D|$)`).test(doc.defaultView?.location?.href || '');
-    return Boolean(urlOk && expectedTitle && logo && titlesEqual(logo, expectedTitle));
+    return Boolean(expectedTitle && logo && titlesEqual(logo, expectedTitle));
   }
 
   function openAboutSection(doc) {
@@ -1546,7 +1596,7 @@
 
   async function waitForMatchingModal(id, expectedTitle, before, timeoutMs) {
     const started = Date.now();
-    const limit = timeoutMs || 8000;
+    const limit = timeoutMs || 15000;
     while (Date.now() - started < limit) {
       await revealModalAbout(document);
       const signature = modalSignature(document);
@@ -1567,7 +1617,7 @@
     closePreviewModal(document);
     await sleep(300);
     const via = openTitleModal(id);
-    const meta = await waitForMatchingModal(id, expectedTitle, before, 8000);
+    const meta = await waitForMatchingModal(id, expectedTitle, before, 15000);
     if (!meta) return { path: 'modal', via, error: `skipped ${id}: the open modal did not match this title` };
     closePreviewModal(document);
     publishDetails('modal', { [String(id)]: meta }, null);
@@ -1576,7 +1626,7 @@
 
   async function readOpenModal(id, expectedTitle) {
     const before = '';
-    const meta = await waitForMatchingModal(id, expectedTitle, before, 12000);
+    const meta = await waitForMatchingModal(id, expectedTitle, before, 20000);
     if (!meta) return { path: 'modal', via: 'navigation', error: `skipped ${id}: the open modal did not match this title` };
     closePreviewModal(document);
     publishDetails('modal', { [String(id)]: meta }, null);
@@ -1598,6 +1648,7 @@
     metadataPaths,
     fetchMemberMetadata,
     fetchPageMetadata,
+    fetchWithRetry,
     attachDetails,
     rowsFromLolomo,
     rowsFromBrowseHtml,

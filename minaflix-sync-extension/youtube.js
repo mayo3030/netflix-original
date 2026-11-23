@@ -85,10 +85,9 @@
     const hasTrailer = /\btrailer\b|\bteaser\b|إعلان/.test(label);
     const official = isOfficialChannel(video.trailerChannel);
     if (official && hasName && hasTrailer) return 100;
-    if (official && hasTrailer) return 80;
+    if (official && hasName) return 80;
     if (hasName && hasTrailer) return 60;
-    if (official && hasName) return 40;
-    if (hasName) return 10;
+    if (hasName) return 20;
     return 0;
   }
 
