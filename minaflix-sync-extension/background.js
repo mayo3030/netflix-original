@@ -118,7 +118,8 @@ async function loadTitleDetails(tabId, ids, send, isActive) {
         args: [id],
         func: (titleId) => globalThis.MinaflixScrape.fetchPageMetadata(titleId),
       });
-      if (result?.result) byId[id] = result.result;
+      const page = result?.result;
+      if (page?.meta) byId[id] = page.meta;
     } catch {
       // One title page can fail without dropping the rest of the export.
     }
@@ -326,13 +327,13 @@ function catalogTitle(item, meta) {
     creators: meta?.creators || [],
     directors: meta?.directors || [],
     mediaType: meta?.mediaType || null,
-    image: meta?.image || null,
+    image: meta?.image || item.image || null,
     backdrop: meta?.backdrop || null,
     source: meta?.source || null,
   };
 }
 
-async function downloadCatalog(rows) {
+async function downloadCatalog(rows, summary, errors) {
   const files = [];
   let current = [];
   let size = 0;
@@ -355,6 +356,8 @@ async function downloadCatalog(rows) {
       part: index + 1,
       parts: files.length,
       exportedAt: new Date().toISOString(),
+      summary: summary || '',
+      errors: errors || [],
       rows: files[index],
     };
     const filename = files.length === 1
@@ -417,13 +420,16 @@ async function syncCatalog(port, isActive) {
     } else {
       send({ type: 'progress', text: `Resuming catalog sync. ${job.pending.length} titles left.` });
     }
-    while (job.pending.length && isActive()) {
+    const detailErrors = [];
+    let sampledShell = false;
+    while (job.pending.length && isActive() && !sampledShell) {
       const batch = job.pending.slice(0, 30);
       send({ type: 'progress', text: `Details ${Object.keys(job.details).length} done, ${job.pending.length} left…` });
       let found = {};
       try {
         found = await pageCall(opened.tabId, { op: 'details', ids: batch }) || {};
-      } catch {
+      } catch (error) {
+        detailErrors.push({ section: 'details', message: error instanceof Error ? error.message : 'member API request failed' });
         found = {};
       }
       const still = [];
@@ -431,25 +437,37 @@ async function syncCatalog(port, isActive) {
         if (found[id]) job.details[id] = found[id];
         else still.push(id);
       }
-      for (const id of still) {
-        if (!isActive()) return;
-        await sleep(1000);
-        try {
-          const [result] = await chrome.scripting.executeScript({
-            target: { tabId: opened.tabId },
-            world: 'MAIN',
-            args: [id],
-            func: (titleId) => globalThis.MinaflixScrape.fetchPageMetadata(titleId),
-          });
-          if (result?.result) job.details[id] = result.result;
-        } catch {
-          // Leave this title as a name-only card.
+      if (!Object.keys(found).length && still.length) {
+        const sample = still.slice(0, 2);
+        for (const id of sample) {
+          if (!isActive()) return;
+          try {
+            const [result] = await chrome.scripting.executeScript({
+              target: { tabId: opened.tabId },
+              world: 'MAIN',
+              args: [id],
+              func: (titleId) => globalThis.MinaflixScrape.fetchPageMetadata(titleId),
+            });
+            const page = result?.result;
+            if (page?.meta) job.details[id] = page.meta;
+            else detailErrors.push({ section: 'details', id, message: page?.error || 'title page returned no metadata' });
+          } catch (error) {
+            detailErrors.push({ section: 'details', id, message: error instanceof Error ? error.message : 'title page fetch failed' });
+          }
+          await sleep(1000);
+        }
+        const shell = detailErrors.some((item) => /SPA shell|redirected to login/.test(item.message || ''));
+        if (shell && !Object.keys(job.details).length) {
+          sampledShell = true;
+          detailErrors.push({ section: 'details', message: `Stopped title-page lookups after ${sample.length} samples failed the same way. Card images from the browse page are still saved.` });
+          send({ type: 'progress', text: detailErrors[detailErrors.length - 1].message });
         }
       }
-      job.pending = job.pending.slice(batch.length);
+      job.pending = sampledShell ? [] : job.pending.slice(batch.length);
       await writeCatalogJob(job);
       if (job.pending.length) await sleep(1000);
     }
+    job.errors = detailErrors;
     if (!isActive()) {
       send({ type: 'progress', text: 'Paused. Open the extension again to resume.' });
       return;
@@ -458,10 +476,15 @@ async function syncCatalog(port, isActive) {
       name: row.name,
       titles: row.titles.map((item) => catalogTitle(item, job.details[item.netflixId])),
     })).filter((row) => row.titles.length);
-    const parts = await downloadCatalog(rows);
-    await chrome.storage.local.remove(CATALOG_JOB);
     const count = rows.reduce((sum, row) => sum + row.titles.length, 0);
-    send({ type: 'done', text: `Exported ${count} catalog titles in ${rows.length} rows${parts > 1 ? ` (${parts} files)` : ''}.` });
+    const images = rows.reduce((sum, row) => sum + row.titles.filter((item) => item.image).length, 0);
+    const detailed = Object.keys(job.details).length;
+    const summary = `Exported ${count} catalog titles in ${rows.length} rows. Images ${images}. Details ${detailed}.`;
+    send({ type: 'summary', text: summary });
+    await sleep(400);
+    const parts = await downloadCatalog(rows, summary, job.errors || []);
+    await chrome.storage.local.remove(CATALOG_JOB);
+    send({ type: 'done', text: summary });
   } catch (error) {
     send({ type: 'error', text: error instanceof Error ? error.message : 'Catalog sync failed. Open the extension again to resume.' });
   }

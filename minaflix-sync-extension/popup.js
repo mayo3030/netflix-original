@@ -19,6 +19,9 @@ function startExport(mode) {
     if (message?.type === 'progress' && typeof message.text === 'string') {
       pushStatus(message.text);
     }
+    if (message?.type === 'summary') {
+      summary.textContent = message.text || '';
+    }
     if (message?.type === 'done') {
       summary.textContent = message.text || 'Exported 0 watched, 0 My List';
       button.disabled = false;

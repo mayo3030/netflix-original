@@ -318,7 +318,7 @@ const liveBrowse = `
       <div data-virtual-slot="8">
         <a href="/browse?jbv=80996601" aria-label="Love Is Blind" data-uia="standard-card">
           <div data-uia="card-image-focus-host">
-            <img alt="" src="https://occ-0-2430-2433.1.nflxso.net/dnm/api/v6/example/love.webp">
+            <img alt="" srcset="https://occ-0-2430-2433.1.nflxso.net/dnm/api/v6/example/love-2x.webp 2x" src="https://occ-0-2430-2433.1.nflxso.net/dnm/api/v6/example/love.webp">
           </div>
         </a>
       </div>
@@ -338,7 +338,7 @@ describe('live browse carousel', () => {
     expect(parsed.rows[0].titles.map((item) => item.netflixId)).toEqual(['80996601', '81983578']);
     expect(parsed.rows[0].titles[0]).toMatchObject({
       title: 'Love Is Blind',
-      image: 'https://occ-0-2430-2433.1.nflxso.net/dnm/api/v6/example/love.webp',
+      image: 'https://occ-0-2430-2433.1.nflxso.net/dnm/api/v6/example/love-2x.webp',
     });
   });
 
@@ -353,6 +353,18 @@ describe('live browse carousel', () => {
     expect(parsed.genres.map((genre) => genre.id)).toEqual(['83', '34399']);
     expect(parsed.genres[0].name).toBe('Shows');
     expect(parsed.rows[0].titles[0].netflixId).toBe('80996601');
+  });
+});
+
+describe('title page diagnosis', () => {
+  it('explains a browse shell that has no metadata', () => {
+    const dom = page('', 'https://www.netflix.com/browse');
+    const result = dom.window.MinaflixScrape.diagnoseTitleHtml(
+      '<html><body><div id="app"></div></body></html>',
+      'https://www.netflix.com/browse?jbv=80996601',
+    );
+    expect(result.reason).toMatch(/SPA shell/);
+    expect(result.meta).toBeUndefined();
   });
 });
 

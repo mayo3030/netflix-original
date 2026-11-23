@@ -546,10 +546,19 @@
     return netflixIdFromHref(href);
   }
 
+  function artworkUrl(value) {
+    const src = absoluteHttps(String(value || '').trim());
+    return /nflxso\.net|nflximg/i.test(src) ? src : null;
+  }
+
   function cardImage(anchor) {
     const image = anchor.querySelector('[data-uia="card-image-focus-host"] img') || anchor.querySelector('img');
-    const src = absoluteHttps(image?.getAttribute('src') || '');
-    return /nflxso\.net|nflximg/i.test(src) ? src : null;
+    if (!image) return null;
+    const srcset = image.getAttribute('srcset') || '';
+    const parts = srcset.split(',').map((part) => part.trim()).filter(Boolean);
+    const twox = parts.find((part) => /\s2x$/i.test(part));
+    const chosen = (twox || parts[parts.length - 1] || '').replace(/\s+\d+(?:\.\d+)?x$/i, '').trim();
+    return artworkUrl(chosen) || artworkUrl(image.currentSrc) || artworkUrl(image.getAttribute('src'));
   }
 
   function titlesFromRoot(rootNode) {
@@ -701,8 +710,38 @@
     return { rows, genres };
   }
 
+  async function waitForArtwork(anchor) {
+    const started = Date.now();
+    let found = cardImage(anchor);
+    while (!found && Date.now() - started < 1200) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      found = cardImage(anchor);
+    }
+    return found;
+  }
+
+  async function harvestVisibleCards(images) {
+    const cards = document.querySelectorAll('a[data-uia$="-card"][href*="jbv="]');
+    for (const anchor of cards) {
+      const netflixId = idFromCardHref(anchor.getAttribute('href'));
+      if (!netflixId || images.has(netflixId)) continue;
+      const image = await waitForArtwork(anchor);
+      if (image) images.set(netflixId, image);
+    }
+  }
+
+  function applyHarvestedImages(parsed, images) {
+    for (const row of parsed.rows) {
+      for (const title of row.titles) {
+        if (!title.image && images.has(title.netflixId)) title.image = images.get(title.netflixId);
+      }
+    }
+    return parsed;
+  }
+
   async function collectLiveBrowse() {
     const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const images = new Map();
     for (let step = 0; step < 5; step += 1) {
       window.scrollBy(0, Math.max(500, window.innerHeight * 0.8));
       await pause(350);
@@ -710,15 +749,30 @@
         .filter((button) => !button.disabled && button.getAttribute('tabindex') !== '-1');
       for (const button of buttons.slice(0, 8)) {
         button.click();
+        await harvestVisibleCards(images);
         await pause(200);
       }
+      await harvestVisibleCards(images);
     }
-    const dom = rowsFromBrowseDocument(document);
+    const dom = applyHarvestedImages(rowsFromBrowseDocument(document), images);
     const cached = rowsFromGraphqlCache(graphqlCacheFromWindow(globalThis) || graphqlCacheFromHtml(document.documentElement.innerHTML));
     return {
       rows: dom.rows.length ? dom.rows : cached.rows,
       genres: dom.genres.length ? dom.genres : cached.genres,
     };
+  }
+
+  function diagnoseTitleHtml(html, finalUrl) {
+    const source = String(html || '');
+    const url = String(finalUrl || '');
+    if (/\/login(?:\?|$)/.test(url)) return { reason: 'redirected to login', url };
+    const hasOg = /property=["']og:image["']/i.test(source) || /property=["']og:description["']/i.test(source);
+    const hasLd = /application\/ld\+json/i.test(source);
+    const hasGraphql = /models\.graphql|genreId/.test(source);
+    if (!hasOg && !hasLd && !hasGraphql) return { reason: 'SPA shell without og tags, JSON-LD, or GraphQL cache', url };
+    const meta = metadataFromTitleHtml(source);
+    if (!useful(meta)) return { reason: 'page parsed but had no synopsis, artwork, year, or cast', url };
+    return { meta, url };
   }
 
   async function fetchMemberMetadata(win, ids) {
@@ -748,14 +802,27 @@
   }
 
   async function fetchPageMetadata(id) {
-    try {
-      const response = await fetch(`https://www.netflix.com/title/${id}`, { credentials: 'same-origin' });
-      if (!response.ok) return null;
-      const meta = metadataFromTitleHtml(await response.text());
-      return useful(meta) ? meta : null;
-    } catch {
-      return null;
+    const attempts = [
+      `https://www.netflix.com/title/${id}`,
+      `https://www.netflix.com/browse?jbv=${id}`,
+    ];
+    const failures = [];
+    for (const url of attempts) {
+      try {
+        const response = await fetch(url, { credentials: 'same-origin' });
+        const html = await response.text();
+        const diagnosed = diagnoseTitleHtml(html, response.url || url);
+        if (!response.ok) {
+          failures.push(`${url} HTTP ${response.status}`);
+          continue;
+        }
+        if (diagnosed.meta) return { meta: diagnosed.meta };
+        failures.push(`${url} ${diagnosed.reason}`);
+      } catch (error) {
+        failures.push(`${url} ${error instanceof Error ? error.message : 'fetch failed'}`);
+      }
     }
+    return { error: failures.join('; ') || 'no title metadata' };
   }
 
   async function attachDetails(entries) {
@@ -767,7 +834,7 @@
     for (const id of ids) {
       if (byId[id]) continue;
       const page = await fetchPageMetadata(id);
-      if (useful(page)) byId[id] = page;
+      if (useful(page?.meta)) byId[id] = page.meta;
       await sleep(450);
     }
     return list.map((item) => {
@@ -814,5 +881,7 @@
     graphqlCacheFromHtml,
     catalogPaths,
     collectLiveBrowse,
+    diagnoseTitleHtml,
+    cardImage,
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);
