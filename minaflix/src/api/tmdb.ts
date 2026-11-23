@@ -117,6 +117,7 @@ function mapListItem(raw: RawListItem, fallbackType: MediaType, language: Langua
     detailsError: false,
     openCinema: false,
     credit: null,
+    netflixId: null,
   };
 }
 

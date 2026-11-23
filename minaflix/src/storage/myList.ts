@@ -18,6 +18,7 @@ export type SavedItem = {
   hue: number;
   pattern: Pattern;
   trailerKey: string | null;
+  netflixId: string | null;
 };
 
 export type Folder = {
@@ -66,6 +67,7 @@ export function toSaved(title: Title): SavedItem {
     hue: title.hue,
     pattern: title.pattern,
     trailerKey: title.trailerKey,
+    netflixId: title.netflixId,
   };
 }
 
@@ -89,7 +91,12 @@ function isSavedItem(value: unknown): value is SavedItem {
     && Array.isArray(item.genreIds)
     && typeof item.hue === 'number'
     && isPattern(item.pattern)
-    && (item.trailerKey === null || typeof item.trailerKey === 'string');
+    && (item.trailerKey === null || typeof item.trailerKey === 'string')
+    && (item.netflixId === undefined || item.netflixId === null || typeof item.netflixId === 'string');
+}
+
+function netflixIdOf(value: unknown): string | null {
+  return typeof value === 'string' && /^\d{1,12}$/.test(value) ? value : null;
 }
 
 export function pruneStore(store: ListStore): ListStore {
@@ -134,7 +141,9 @@ export function loadStore(): ListStore {
     const items: Record<string, SavedItem> = {};
     if (candidate.items && typeof candidate.items === 'object') {
       for (const [id, item] of Object.entries(candidate.items)) {
-        if (isSavedItem(item) && item.id === id) items[id] = item;
+        if (isSavedItem(item) && item.id === id) {
+          items[id] = { ...item, netflixId: netflixIdOf(item.netflixId) };
+        }
       }
     }
 

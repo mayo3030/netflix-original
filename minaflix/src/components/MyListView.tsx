@@ -34,6 +34,7 @@ export function MyListView({
       <div className="page-intro">
         <h1>{t('myList')}</h1>
         <p className="fine-print">{t('listLocal')}</p>
+        <button type="button" className="text-btn" onClick={() => onBrowse('import')}>{t('import')}</button>
       </div>
       <div className="list-layout">
         <aside className="folder-column">

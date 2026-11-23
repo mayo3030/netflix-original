@@ -100,7 +100,7 @@ a { color: var(--amber-2); }
   inset-inline: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   min-height: calc(62px + var(--safe-b));
   padding-bottom: var(--safe-b);
   background: rgba(9, 10, 14, 0.94);
@@ -381,6 +381,11 @@ main { padding-bottom: calc(92px + var(--safe-b)); }
   font-size: 16px;
 }
 .search-form { margin: 8px 0 18px; }
+.import-view { display: grid; gap: 12px; max-width: 46rem; }
+.import-view > h1, .import-view > p, .import-form { padding-inline: var(--gutter); }
+.import-view .lede { font-size: 1.15rem; margin: 0; }
+.import-form { display: grid; gap: 10px; justify-items: start; }
+.import-form input { font-size: 16px; }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 16px 12px; }
 .list-layout { display: grid; gap: 22px; }
 .folder-list { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; }

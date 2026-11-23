@@ -100,11 +100,22 @@ export function CatalogProvider({ children }: { children: ReactNode }) {
   }, [language, state.source]);
 
   const loadDetails = useCallback(async (title: Title, signal: AbortSignal) => {
+    if (title.detailsLoaded) return title;
     const key = `${language}:${title.id}`;
     const cached = cache.current.get(key);
     if (cached) return cached;
     const mock = getMockTitle(title.id);
-    const full = mock ?? await fetchTmdbDetails(title, language, signal);
+    if (mock) {
+      const full = { ...mock, netflixId: title.netflixId ?? mock.netflixId };
+      cache.current.set(key, full);
+      return full;
+    }
+    if (!title.id.startsWith('tmdb-')) {
+      const full = { ...title, detailsLoaded: true };
+      cache.current.set(key, full);
+      return full;
+    }
+    const full = await fetchTmdbDetails(title, language, signal);
     cache.current.set(key, full);
     return full;
   }, [language]);

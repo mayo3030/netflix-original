@@ -42,6 +42,7 @@ export type Title = {
   detailsError: boolean;
   openCinema: boolean;
   credit: Credit | null;
+  netflixId: string | null;
 };
 
 export type CatalogRow = {
@@ -51,4 +52,4 @@ export type CatalogRow = {
   titles: Title[];
 };
 
-export type View = 'home' | 'search' | 'list';
+export type View = 'home' | 'search' | 'list' | 'import';

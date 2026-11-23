@@ -5,6 +5,7 @@ import { useMyList } from '../context/MyListProvider';
 import { useLanguage } from '../i18n/LanguageProvider';
 import { isAbort } from '../lib/abort';
 import { folderName } from '../storage/myList';
+import { netflixTitleUrl } from '../import/netflix';
 import { displayText, genreChips, initials } from '../text';
 import type { Title } from '../types';
 import { FolderForm } from './FolderForm';
@@ -117,6 +118,11 @@ export function DetailModal({
               <ul className="chips">
                 {chips.map((chip) => <li key={chip}>{chip}</li>)}
               </ul>
+            ) : null}
+            {shown.netflixId ? (
+              <p className="fine-print">
+                <a href={netflixTitleUrl(shown.netflixId)} target="_blank" rel="noreferrer">{t('openOnNetflix')}</a>
+              </p>
             ) : null}
           </div>
         </div>

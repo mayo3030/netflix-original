@@ -78,17 +78,36 @@ Folders start as “Watch later” and “Favorites” (للمشاهدة لاح�
 
 The bookmark on a card toggles Watch later. The title sheet has a checkbox for every folder.
 
+## Import your own Netflix titles
+
+MinaFlix can show the titles on your own Netflix My List and viewing activity. The extension reads those pages in your browser and downloads a JSON file. MinaFlix then imports that file, or Netflix’s own `ViewingActivity.csv` from **Download all**. Nothing is uploaded to a MinaFlix server. Title names are sent to TMDB only when you have set an API key, and only so a poster can be matched. Unmatched titles stay as name cards.
+
+Netflix can change its page markup, so the export may come back empty or partial after a site update. Reading pages this way may also violate Netflix’s terms of service. That risk is yours. The extension does not ask for your password, does not read or store cookies, does not call Netflix’s private APIs, and does not touch video or DRM.
+
+### Load the extension
+
+1. Open `chrome://extensions`.
+2. Turn on Developer mode.
+3. Choose **Load unpacked** and select the `minaflix-sync-extension/` folder.
+4. In that same browser, sign in at [netflix.com](https://www.netflix.com/).
+5. Click the extension icon, then **Export to MinaFlix**.
+6. Leave the tab alone while it opens your My List and viewing activity. It scrolls and presses Show more slowly, then downloads `minaflix-netflix-export.json`.
+
+### Import
+
+1. Run MinaFlix and open **Import**.
+2. Choose the JSON file, or a `ViewingActivity.csv` from Netflix’s Download all button.
+3. Import. Titles land in the folders **Netflix – My List** and **Netflix – Watched**.
+4. Open a title and use **Open on Netflix** to go to `https://www.netflix.com/title/<id>`.
+
+Re-importing replaces those two folders with the new file.
+
 ## Project layout
 
 ```
-minaflix/
-  index.html
-  src/
-    api/tmdb.ts          TMDB client
-    data/mock.ts         offline catalog
-    components/          home, rows, sheet, search, My List
-    i18n/                English and Arabic strings
-    storage/myList.ts    local folder store
+minaflix/                         catalog app
+minaflix-sync-extension/          read-only Chrome extension
+minaflix/src/import/              JSON and CSV parsers
 ```
 
 ## Phone check

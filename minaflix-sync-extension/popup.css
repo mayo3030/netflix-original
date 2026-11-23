@@ -1,0 +1,24 @@
+body {
+  margin: 0;
+  width: 280px;
+  padding: 16px;
+  background: #090a0e;
+  color: #f6f1e7;
+  font: 14px/1.45 "Segoe UI", sans-serif;
+}
+header { display: flex; gap: 8px; align-items: baseline; }
+header span { color: #e6a15a; }
+button {
+  width: 100%;
+  margin: 8px 0;
+  min-height: 42px;
+  border: 0;
+  border-radius: 999px;
+  background: #e6a15a;
+  color: #1b130b;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.6; cursor: progress; }
+.fine, #status { color: #c0b6aa; font-size: 12px; }

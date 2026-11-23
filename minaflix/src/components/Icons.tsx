@@ -45,6 +45,14 @@ export function SearchIcon() {
   );
 }
 
+export function ImportIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="icon">
+      <path d="M12 4v10M8 10l4 4 4-4M5 19h14" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function ListIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" className="icon">

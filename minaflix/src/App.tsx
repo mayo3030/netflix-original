@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { DetailModal } from './components/DetailModal';
+import { ImportView } from './components/ImportView';
 import { Footer } from './components/Footer';
 import { Header } from './components/Header';
 import { HomeView } from './components/HomeView';
@@ -10,7 +11,7 @@ import type { Title, View } from './types';
 
 function readView(): View {
   const raw = window.location.hash.replace(/^#\/?/, '');
-  if (raw === 'search' || raw === 'list') return raw;
+  if (raw === 'search' || raw === 'list' || raw === 'import') return raw;
   return 'home';
 }
 
@@ -66,6 +67,7 @@ export function App() {
         {view === 'home' ? <HomeView onOpen={(title, options) => setModal({ title, trailer: Boolean(options?.trailer) })} /> : null}
         {view === 'search' ? <SearchView onOpen={(title) => setModal({ title, trailer: false })} /> : null}
         {view === 'list' ? <MyListView onOpen={(title) => setModal({ title, trailer: false })} onBrowse={navigate} /> : null}
+        {view === 'import' ? <ImportView onDone={() => navigate('list')} /> : null}
       </main>
       {view === 'home' ? <Footer /> : null}
       {modal ? (

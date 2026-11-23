@@ -1,6 +1,6 @@
 import { useLanguage } from '../i18n/LanguageProvider';
 import type { View } from '../types';
-import { HomeIcon, ListIcon, SearchIcon } from './Icons';
+import { HomeIcon, ImportIcon, ListIcon, SearchIcon } from './Icons';
 import { Logo } from './Logo';
 
 export function Header({
@@ -17,6 +17,7 @@ export function Header({
     { id: 'home', label: t('home'), icon: HomeIcon },
     { id: 'search', label: t('search'), icon: SearchIcon },
     { id: 'list', label: t('myList'), icon: ListIcon },
+    { id: 'import', label: t('import'), icon: ImportIcon },
   ];
 
   return (

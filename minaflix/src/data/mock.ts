@@ -709,6 +709,7 @@ function toTitle(seed: Seed, index: number): Title {
     detailsError: false,
     openCinema: Boolean(seed.openCinema),
     credit: seed.credit ?? null,
+    netflixId: null,
   };
 }
 
@@ -765,10 +766,10 @@ export function searchMock(query: string): Title[] {
 
 export function titleFromSaved(saved: SavedItem): Title {
   const mock = getMockTitle(saved.id);
-  if (mock) return mock;
+  if (mock) return { ...mock, netflixId: saved.netflixId };
   return {
     id: saved.id,
-    source: saved.id.startsWith('mock-') ? 'mock' : 'tmdb',
+    source: saved.id.startsWith('tmdb-') ? 'tmdb' : 'mock',
     mediaType: saved.mediaType,
     title: saved.title,
     titleAr: saved.titleAr,
@@ -786,9 +787,10 @@ export function titleFromSaved(saved: SavedItem): Title {
     runtime: null,
     seasons: null,
     cast: [],
-    detailsLoaded: false,
+    detailsLoaded: saved.id.startsWith('netflix-'),
     detailsError: false,
     openCinema: false,
     credit: null,
+    netflixId: saved.netflixId,
   };
 }

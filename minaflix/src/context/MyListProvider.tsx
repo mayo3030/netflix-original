@@ -12,6 +12,7 @@ type MyListValue = {
   createFolder: (name: string) => string | null;
   renameFolder: (id: string, name: string) => void;
   deleteFolder: (id: string) => void;
+  replaceFolder: (folder: Folder, titles: Title[]) => void;
 };
 
 const MyListContext = createContext<MyListValue | null>(null);
@@ -100,6 +101,18 @@ export function MyListProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
+  const replaceFolder = useCallback((folder: Folder, titles: Title[]) => {
+    setStore((prev) => {
+      const items = { ...prev.items };
+      for (const title of titles) items[title.id] = toSaved(title);
+      const next = { ...folder, itemIds: titles.map((title) => title.id) };
+      const folders = prev.folders.some((item) => item.id === folder.id)
+        ? prev.folders.map((item) => (item.id === folder.id ? next : item))
+        : [...prev.folders, next];
+      return pruneStore({ version: 1, folders, items });
+    });
+  }, []);
+
   const savedIds = useMemo(() => new Set(store.folders.flatMap((folder) => folder.itemIds)), [store.folders]);
 
   const isSaved = useCallback((id: string) => savedIds.has(id), [savedIds]);
@@ -118,7 +131,8 @@ export function MyListProvider({ children }: { children: ReactNode }) {
     createFolder,
     renameFolder,
     deleteFolder,
-  }), [store.folders, store.items, isSaved, foldersFor, toggleSaved, setInFolder, createFolder, renameFolder, deleteFolder]);
+    replaceFolder,
+  }), [store.folders, store.items, isSaved, foldersFor, toggleSaved, setInFolder, createFolder, renameFolder, deleteFolder, replaceFolder]);
 
   return <MyListContext.Provider value={value}>{children}</MyListContext.Provider>;
 }
