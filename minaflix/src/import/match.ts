@@ -44,30 +44,59 @@ function nameCard(entry: NetflixEntry, kind: 'list' | 'watched'): Title {
   return {
     id,
     source: 'mock',
-    mediaType: 'movie',
+    mediaType: entry.mediaType === 'tv' ? 'tv' : 'movie',
     title: entry.title,
     titleAr: '',
-    overview,
-    overviewAr: kind === 'list'
+    overview: entry.synopsis || overview,
+    overviewAr: entry.synopsis ? '' : (kind === 'list'
       ? 'مستورد من قائمتك على نتفليكس. لم يُعثر على تطابق، فبقيت البطاقة بالاسم المُصدَّر.'
-      : `${entry.watchedAt ? `شوهد في ${entry.watchedAt}. ` : ''}مستورد من سجل المشاهدة على نتفليكس. لم يُعثر على تطابق، فبقيت البطاقة بالاسم المُصدَّر.`,
-    posterUrl: null,
-    backdropUrl: null,
+      : `${entry.watchedAt ? `شوهد في ${entry.watchedAt}. ` : ''}مستورد من سجل المشاهدة على نتفليكس. لم يُعثر على تطابق، فبقيت البطاقة بالاسم المُصدَّر.`),
+    posterUrl: entry.image ?? null,
+    backdropUrl: entry.backdrop ?? entry.image ?? null,
     rating: 0,
-    year: /^\d{4}/.test(entry.watchedAt ?? '') ? (entry.watchedAt ?? '').slice(0, 4) : '',
+    year: entry.year || (/^\d{4}/.test(entry.watchedAt ?? '') ? (entry.watchedAt ?? '').slice(0, 4) : ''),
     genreIds: [],
-    genreNames: [],
+    genreNames: entry.genres ?? [],
     hue: hueFromId(id),
     pattern: patternFromId(id),
     trailerKey: null,
-    runtime: null,
-    seasons: null,
-    cast: [],
+    runtime: entry.runtimeMinutes ?? null,
+    seasons: entry.seasons ?? null,
+    cast: (entry.cast ?? []).map((name, index) => ({
+      id: index + 1,
+      name,
+      nameAr: '',
+      character: '',
+      characterAr: '',
+      profileUrl: null,
+    })),
     detailsLoaded: true,
     detailsError: false,
     openCinema: false,
     credit: null,
     netflixId: entry.netflixId,
+    maturity: entry.maturity ?? null,
+    creators: entry.creators ?? [],
+    directors: entry.directors ?? [],
+  };
+}
+
+function applyImportedDetails(title: Title, entry: NetflixEntry): Title {
+  const card = nameCard(entry, 'watched');
+  return {
+    ...title,
+    posterUrl: title.posterUrl || card.posterUrl,
+    backdropUrl: title.backdropUrl || card.backdropUrl,
+    overview: title.overview || card.overview,
+    year: title.year || card.year,
+    runtime: title.runtime ?? card.runtime,
+    seasons: title.seasons ?? card.seasons,
+    genreNames: title.genreNames.length ? title.genreNames : card.genreNames,
+    cast: title.cast.length ? title.cast : card.cast,
+    maturity: title.maturity || card.maturity,
+    creators: title.creators?.length ? title.creators : card.creators,
+    directors: title.directors?.length ? title.directors : card.directors,
+    mediaType: entry.mediaType === 'tv' ? 'tv' : title.mediaType,
   };
 }
 
@@ -80,9 +109,9 @@ async function matchOne(
 ): Promise<MatchedTitle> {
   const searched = searchQueryFromNetflixTitle(entry.showTitle || entry.title);
   const query = entry.showTitle || searched.query;
-  const preferTv = Boolean(entry.showTitle) || searched.preferTv;
+  const preferTv = entry.mediaType === 'tv' || Boolean(entry.showTitle) || searched.preferTv;
   const demo = findDemo(query) ?? findDemo(entry.title);
-  if (demo) return { title: { ...demo, netflixId: entry.netflixId }, kind: 'demo' };
+  if (demo) return { title: applyImportedDetails({ ...demo, netflixId: entry.netflixId }, entry), kind: 'demo' };
   if (!tmdbConfigured() || budget.left <= 0) return { title: nameCard(entry, kind), kind: 'name' };
 
   budget.left -= 1;
@@ -93,7 +122,7 @@ async function matchOne(
     if (!hit) return { title: nameCard(entry, kind), kind: 'name' };
     const id = entry.netflixId ? `netflix-${entry.netflixId}` : hit.id;
     return {
-      title: { ...hit, id, netflixId: entry.netflixId, detailsLoaded: true },
+      title: applyImportedDetails({ ...hit, id, netflixId: entry.netflixId, detailsLoaded: true }, entry),
       kind: 'tmdb',
     };
   } catch (error) {

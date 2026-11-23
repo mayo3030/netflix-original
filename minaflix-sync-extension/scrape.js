@@ -281,6 +281,375 @@
     return { ...latest, clicks };
   }
 
+  function unwrap(node) {
+    if (node == null || typeof node !== 'object') return node;
+    const keys = Object.keys(node);
+    const onlyValue = keys.length > 0 && keys.every((key) => key === 'value' || key.startsWith('$'));
+    if (onlyValue && Object.prototype.hasOwnProperty.call(node, 'value')) return unwrap(node.value);
+    return node;
+  }
+
+  function asText(node) {
+    const value = unwrap(node);
+    if (typeof value === 'string') return clean(value);
+    if (typeof value === 'number') return String(value);
+    return '';
+  }
+
+  function asNumber(node) {
+    const value = unwrap(node);
+    const number = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function namedPeople(node) {
+    const value = unwrap(node);
+    if (!value || typeof value !== 'object') return [];
+    const source = Array.isArray(value) ? value : value;
+    const keys = Array.isArray(source) ? source.map((_, index) => String(index)) : Object.keys(source).filter((key) => /^\d+$/.test(key));
+    return keys.sort((a, b) => Number(a) - Number(b)).flatMap((key) => {
+      const item = unwrap(source[key]);
+      const name = typeof item === 'string' ? item : asText(item?.name);
+      return name ? [name] : [];
+    }).slice(0, 16);
+  }
+
+  function imageUrlIn(node) {
+    const found = [];
+    const visit = (current) => {
+      const value = unwrap(current);
+      if (typeof value === 'string' && /^https?:\/\//.test(value) && /nflxso\.net|nflximg/i.test(value)) found.push(value);
+      else if (value && typeof value === 'object') Object.values(value).forEach(visit);
+    };
+    visit(node);
+    return found[0] || null;
+  }
+
+  function maturityText(node) {
+    const value = unwrap(node);
+    if (typeof value === 'string') return clean(value);
+    if (!value || typeof value !== 'object') return '';
+    return clean(asText(value.rating?.value) || asText(value.rating) || asText(value.value) || asText(value.certification) || asText(value.boardRating));
+  }
+
+  function metadataFromVideo(video) {
+    if (!video || typeof video !== 'object') return null;
+    const title = asText(video.title);
+    const synopsis = asText(video.synopsis) || asText(video.summary?.synopsis);
+    const yearNumber = asNumber(video.year);
+    const runtimeRaw = asNumber(video.runtime);
+    const runtimeMinutes = runtimeRaw == null ? null : (runtimeRaw > 300 ? Math.round(runtimeRaw / 60) : runtimeRaw);
+    const seasons = asNumber(video.seasonCount);
+    const summaryType = asText(video.summary?.type).toLowerCase();
+    const mediaType = seasons && seasons > 0 || /show|series/.test(summaryType) ? 'tv' : (summaryType.includes('movie') || runtimeMinutes ? 'movie' : null);
+    const image = imageUrlIn(video.boxarts);
+    const backdrop = imageUrlIn(video.storyarts) || imageUrlIn(video.bgImages) || imageUrlIn(video.artworks);
+    return {
+      title,
+      synopsis,
+      year: yearNumber ? String(yearNumber) : '',
+      maturity: maturityText(video.maturity),
+      runtimeMinutes,
+      seasons,
+      genres: namedPeople(video.genres),
+      cast: namedPeople(video.cast),
+      creators: namedPeople(video.creators),
+      directors: namedPeople(video.directors),
+      mediaType: mediaType === 'tv' || mediaType === 'movie' ? mediaType : null,
+      image,
+      backdrop: backdrop && backdrop !== image ? backdrop : null,
+      source: 'api',
+    };
+  }
+
+  function metadataFromApiPayload(payload) {
+    const videos = payload?.jsonGraph?.videos || payload?.videos || {};
+    const byId = {};
+    for (const [id, video] of Object.entries(videos)) {
+      if (!/^\d{1,12}$/.test(id)) continue;
+      const meta = metadataFromVideo(video);
+      if (meta && (meta.synopsis || meta.image || meta.title || meta.cast.length)) byId[id] = meta;
+    }
+    return byId;
+  }
+
+  function metaContent(doc, attr, key) {
+    for (const node of doc.querySelectorAll('meta')) {
+      if ((node.getAttribute(attr) || '').toLowerCase() === key) return clean(node.getAttribute('content'));
+    }
+    return '';
+  }
+
+  function absoluteHttps(value) {
+    const text = String(value || '').trim();
+    if (text.startsWith('//')) return `https:${text}`;
+    return /^https:\/\//.test(text) ? text : '';
+  }
+
+  function jsonLdNodes(doc) {
+    const nodes = [];
+    for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const parsed = JSON.parse(script.textContent || '');
+        const list = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.['@graph']) ? parsed['@graph'] : [parsed]);
+        for (const node of list) if (node && typeof node === 'object') nodes.push(node);
+      } catch {
+        // Ignore a broken JSON-LD block and keep reading the page.
+      }
+    }
+    return nodes;
+  }
+
+  function personNames(value) {
+    const list = Array.isArray(value) ? value : (value ? [value] : []);
+    return list.flatMap((item) => {
+      if (typeof item === 'string') return [clean(item)];
+      return asText(item?.name) ? [asText(item.name)] : [];
+    }).filter(Boolean).slice(0, 16);
+  }
+
+  function isoDurationMinutes(value) {
+    const match = /PT(?:(\d+)H)?(?:(\d+)M)?/i.exec(String(value || ''));
+    if (!match) return null;
+    const minutes = (Number(match[1] || 0) * 60) + Number(match[2] || 0);
+    return minutes > 0 ? minutes : null;
+  }
+
+  function metadataFromTitleDocument(doc) {
+    const ld = jsonLdNodes(doc).find((node) => /movie|tvseries|tvepisode|creativework/i.test(String(node['@type'] || ''))) || jsonLdNodes(doc)[0];
+    const ogImage = absoluteHttps(metaContent(doc, 'property', 'og:image') || metaContent(doc, 'name', 'og:image') || metaContent(doc, 'name', 'twitter:image'));
+    const ldImage = absoluteHttps(typeof ld?.image === 'string' ? ld.image : ld?.image?.url);
+    const card = [...doc.querySelectorAll('img')].map((img) => absoluteHttps(img.getAttribute('src') || img.getAttribute('data-src'))).find((src) => /nflxso\.net|nflximg/i.test(src) && /boxart|boxshot|title-card|titlecard|poster|storyart/i.test(src));
+    const image = ogImage || ldImage || card || null;
+    const story = [...doc.querySelectorAll('img')].map((img) => absoluteHttps(img.getAttribute('src') || img.getAttribute('data-src'))).find((src) => /nflxso\.net|nflximg/i.test(src) && /storyart|backdrop|billboard/i.test(src));
+    const typeText = String(ld?.['@type'] || metaContent(doc, 'property', 'og:type')).toLowerCase();
+    const seasons = Number(ld?.numberOfSeasons);
+    const year = String(ld?.datePublished || metaContent(doc, 'property', 'og:video:release_date') || '').slice(0, 4);
+    const synopsis = clean(ld?.description) || metaContent(doc, 'property', 'og:description') || metaContent(doc, 'name', 'description') || clean(doc.querySelector('[data-uia*="synopsis"]')?.textContent);
+    const genres = personNames(ld?.genre);
+    const domGenres = [...doc.querySelectorAll('[data-uia*="genre"]')].map((node) => clean(node.textContent)).filter(Boolean);
+    return {
+      title: clean(ld?.name) || metaContent(doc, 'property', 'og:title'),
+      synopsis,
+      year: /^\d{4}$/.test(year) ? year : '',
+      maturity: clean(ld?.contentRating) || clean(doc.querySelector('[data-uia*="maturity"]')?.textContent),
+      runtimeMinutes: isoDurationMinutes(ld?.duration) || isoDurationMinutes(ld?.timeRequired),
+      seasons: Number.isFinite(seasons) && seasons > 0 ? seasons : null,
+      genres: genres.length ? genres : domGenres.slice(0, 8),
+      cast: personNames(ld?.actor),
+      creators: personNames(ld?.creator),
+      directors: personNames(ld?.director),
+      mediaType: /tv|series|episode/.test(typeText) || (Number.isFinite(seasons) && seasons > 0) ? 'tv' : (/movie/.test(typeText) ? 'movie' : null),
+      image,
+      backdrop: story && story !== image ? story : null,
+      source: 'page',
+    };
+  }
+
+  function metadataFromTitleHtml(html) {
+    try {
+      return metadataFromTitleDocument(new DOMParser().parseFromString(String(html || ''), 'text/html'));
+    } catch {
+      return null;
+    }
+  }
+
+  function readMemberApi(context) {
+    const parsed = typeof context === 'string' ? JSON.parse(context) : context;
+    const models = parsed?.models || parsed || {};
+    const defs = models.serverDefs?.data || models.serverDefs || {};
+    const user = models.userInfo?.data || models.userInfo || {};
+    const buildId = defs.BUILD_IDENTIFIER || defs.buildIdentifier || '';
+    const apiRoot = defs.API_ROOT || defs.SHAKTI_API_ROOT || defs.apiRoot || '/api/shakti';
+    const authURL = user.authURL || '';
+    if (!buildId || !authURL) return null;
+    return { buildId: String(buildId), apiRoot: String(apiRoot), authURL: String(authURL) };
+  }
+
+  function memberApiUrl(api) {
+    const root = api.apiRoot.replace(/\/$/, '');
+    const absolute = root.startsWith('http') ? root : `https://www.netflix.com${root.startsWith('/') ? '' : '/'}${root}`;
+    if (/\/(shakti|memberapi)\/[^/]+$/i.test(absolute)) return `${absolute}/pathEvaluator`;
+    return `${absolute}/${api.buildId}/pathEvaluator`;
+  }
+
+  function metadataPaths(ids) {
+    const range = { from: 0, to: 14 };
+    return ids.flatMap((id) => {
+      const video = ['videos', Number(id)];
+      return [
+        [...video, 'title'],
+        [...video, 'synopsis'],
+        [...video, 'year'],
+        [...video, 'runtime'],
+        [...video, 'seasonCount'],
+        [...video, 'maturity'],
+        [...video, 'summary'],
+        [...video, 'boxarts', '_342x192', 'jpg'],
+        [...video, 'storyarts', '_1632x873', 'jpg'],
+        [...video, 'genres', range, 'name'],
+        [...video, 'cast', range, 'name'],
+        [...video, 'creators', range, 'name'],
+        [...video, 'directors', range, 'name'],
+      ];
+    });
+  }
+
+  function useful(meta) {
+    return Boolean(meta && (meta.synopsis || meta.image || meta.cast?.length || meta.genres?.length || meta.year));
+  }
+
+  function catalogPaths(rowFrom, rowTo, itemTo) {
+    const rows = { from: rowFrom, to: rowTo };
+    const items = { from: 0, to: itemTo };
+    return [
+      ['lolomo', rows, 'displayName'],
+      ['lolomo', rows, items, 'summary'],
+      ['lolomo', rows, items, 'reference'],
+    ];
+  }
+
+  function videoIdFromCell(cell) {
+    const ref = unwrap(cell?.reference);
+    if (Array.isArray(ref) && ref[0] === 'videos' && /^\d{1,12}$/.test(String(ref[1] || ''))) return String(ref[1]);
+    const summary = unwrap(cell?.summary);
+    const summaryId = summary && typeof summary === 'object' ? summary.id : summary;
+    if (/^\d{1,12}$/.test(String(summaryId || ''))) return String(summaryId);
+    return null;
+  }
+
+  function rowsFromLolomo(payload) {
+    const lolomo = payload?.jsonGraph?.lolomo || payload?.lolomo;
+    if (!lolomo || typeof lolomo !== 'object') return [];
+    const rows = [];
+    for (const index of Object.keys(lolomo).filter((key) => /^\d+$/.test(key)).sort((a, b) => Number(a) - Number(b))) {
+      const row = lolomo[index];
+      if (!row || typeof row !== 'object') continue;
+      const name = asText(row.displayName) || asText(row.title) || `Row ${Number(index) + 1}`;
+      const titles = [];
+      const seen = new Set();
+      for (const key of Object.keys(row).filter((item) => /^\d+$/.test(item))) {
+        const id = videoIdFromCell(row[key]);
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const summary = unwrap(row[key]?.summary);
+        titles.push({ netflixId: id, title: summary && typeof summary === 'object' ? asText(summary.title) : '' });
+      }
+      if (titles.length) rows.push({ name, titles });
+    }
+    return rows;
+  }
+
+  function linksIn(rootNode) {
+    const titles = [];
+    const seen = new Set();
+    if (!rootNode) return titles;
+    for (const anchor of rootNode.querySelectorAll('a[href*="/title/"], a[href*="/watch/"]')) {
+      const netflixId = netflixIdFromHref(anchor.getAttribute('href'));
+      const title = titleFromAnchor(anchor);
+      if (!netflixId || seen.has(netflixId)) continue;
+      seen.add(netflixId);
+      titles.push({ netflixId, title });
+    }
+    return titles;
+  }
+
+  function rowsFromBrowseHtml(html) {
+    const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+    const rows = [];
+    const headings = [...doc.querySelectorAll('h2, [data-uia*="row-title"]')];
+    for (const heading of headings) {
+      const name = clean(heading.textContent);
+      const container = heading.closest('section, [data-list-context], .lolomoRow, .row') || heading.parentElement;
+      const titles = linksIn(container);
+      if (name && titles.length) rows.push({ name, titles });
+    }
+    if (!rows.length) {
+      const titles = linksIn(doc.body || doc);
+      if (titles.length) rows.push({ name: 'Browse', titles });
+    }
+    const genres = [];
+    const seenGenres = new Set();
+    for (const anchor of doc.querySelectorAll('a[href*="/browse/genre/"]')) {
+      const match = /\/browse\/genre\/(\d+)/.exec(anchor.getAttribute('href') || '');
+      if (!match || seenGenres.has(match[1])) continue;
+      seenGenres.add(match[1]);
+      genres.push({ id: match[1], name: clean(anchor.textContent) || `Genre ${match[1]}` });
+    }
+    return { rows, genres };
+  }
+
+  async function fetchMemberMetadata(win, ids) {
+    try {
+      const api = readMemberApi(win.netflix?.reactContext || win.netflix?.appContext);
+      if (!api || !ids.length) return {};
+      const byId = {};
+      for (let start = 0; start < ids.length; start += 40) {
+        const chunk = ids.slice(start, start + 40);
+        try {
+          const response = await fetch(memberApiUrl(api), {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json', accept: 'application/json' },
+            body: JSON.stringify({ paths: metadataPaths(chunk), authURL: api.authURL }),
+          });
+          if (response.ok) Object.assign(byId, metadataFromApiPayload(await response.json()));
+        } catch {
+          // This batch failed. Title pages fill the gap.
+        }
+        if (start + 40 < ids.length) await sleep(700);
+      }
+      return byId;
+    } catch {
+      return {};
+    }
+  }
+
+  async function fetchPageMetadata(id) {
+    try {
+      const response = await fetch(`https://www.netflix.com/title/${id}`, { credentials: 'same-origin' });
+      if (!response.ok) return null;
+      const meta = metadataFromTitleHtml(await response.text());
+      return useful(meta) ? meta : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function attachDetails(entries) {
+    const list = Array.isArray(entries) ? entries : [];
+    const ids = [...new Set(list.map((item) => item?.netflixId).filter((id) => /^\d{1,12}$/.test(String(id || ''))))];
+    const byId = {};
+    const api = await fetchMemberMetadata(globalThis, ids);
+    for (const [id, meta] of Object.entries(api)) if (useful(meta)) byId[id] = meta;
+    for (const id of ids) {
+      if (byId[id]) continue;
+      const page = await fetchPageMetadata(id);
+      if (useful(page)) byId[id] = page;
+      await sleep(450);
+    }
+    return list.map((item) => {
+      const meta = item?.netflixId ? byId[item.netflixId] : null;
+      if (!meta) return item;
+      return {
+        ...item,
+        synopsis: meta.synopsis || null,
+        year: meta.year || null,
+        maturity: meta.maturity || null,
+        runtimeMinutes: meta.runtimeMinutes,
+        seasons: meta.seasons,
+        genres: meta.genres,
+        cast: meta.cast,
+        creators: meta.creators,
+        directors: meta.directors,
+        mediaType: meta.mediaType,
+        image: meta.image,
+        backdrop: meta.backdrop,
+        source: meta.source,
+      };
+    });
+  }
+
   root.MinaflixScrape = {
     collectMyList,
     collectViewing,
@@ -289,5 +658,16 @@
     isActivityUrl,
     netflixIdFromHref,
     expandAndCollect,
+    metadataFromApiPayload,
+    metadataFromTitleHtml,
+    readMemberApi,
+    memberApiUrl,
+    metadataPaths,
+    fetchMemberMetadata,
+    fetchPageMetadata,
+    attachDetails,
+    rowsFromLolomo,
+    rowsFromBrowseHtml,
+    catalogPaths,
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

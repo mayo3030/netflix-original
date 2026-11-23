@@ -13,7 +13,7 @@ export function Poster({ title, badge }: { title: Title; badge?: string }) {
   return (
     <div className="poster-frame">
       {showImage && url ? (
-        <img src={url} alt="" loading="lazy" decoding="async" onError={() => setFailedUrl(url)} />
+        <img src={url} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailedUrl(url)} />
       ) : (
         <Art hue={title.hue} pattern={title.pattern} variant="poster" letter={letter} />
       )}
@@ -30,7 +30,7 @@ export function Backdrop({ title }: { title: Title }) {
     <div className="backdrop">
       <Art hue={title.hue} pattern={title.pattern} variant="hero" />
       {showImage && url ? (
-        <img src={url} alt="" decoding="async" onError={() => setFailedUrl(url)} />
+        <img src={url} alt="" decoding="async" referrerPolicy="no-referrer" onError={() => setFailedUrl(url)} />
       ) : null}
     </div>
   );

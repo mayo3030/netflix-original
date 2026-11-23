@@ -1,14 +1,26 @@
+import { useState } from 'react';
 import { useCatalog } from '../context/CatalogProvider';
 import { useLanguage } from '../i18n/LanguageProvider';
-import type { Title } from '../types';
+import { catalogRows, clearStoredCatalog, loadStoredCatalog } from '../import/catalog';
+import type { CatalogRow, Title } from '../types';
 import { Hero } from './Hero';
 import { Row } from './Row';
 
 export function HomeView({ onOpen }: { onOpen: (title: Title, options?: { trailer?: boolean }) => void }) {
   const { hero, rows, status, updating, usedFallback, fallbackReason, reload } = useCatalog();
   const { t } = useLanguage();
+  const [imported, setImported] = useState<CatalogRow[] | null>(() => {
+    const stored = loadStoredCatalog();
+    return stored ? catalogRows(stored).rows : null;
+  });
+  const [importedHero, setImportedHero] = useState<Title | null>(() => {
+    const stored = loadStoredCatalog();
+    return stored ? catalogRows(stored).hero : null;
+  });
+  const shownHero = importedHero ?? hero;
+  const shownRows = imported ?? rows;
 
-  if (!hero || (status === 'loading' && rows.length === 0)) {
+  if (!shownHero || (!imported && status === 'loading' && shownRows.length === 0)) {
     return (
       <div className="home" aria-busy="true">
         <div className="hero hero-skeleton" />
@@ -27,8 +39,14 @@ export function HomeView({ onOpen }: { onOpen: (title: Title, options?: { traile
         </div>
       ) : null}
       {updating ? <p className="updating">{t('updating')}</p> : null}
-      <Hero title={hero} onOpen={onOpen} />
-      {rows.map((row) => (
+      {imported ? (
+        <div className="banner" role="status">
+          <p>{t('yourCatalog')}</p>
+          <button type="button" className="btn btn-ghost" onClick={() => { clearStoredCatalog(); setImported(null); setImportedHero(null); }}>{t('clearCatalog')}</button>
+        </div>
+      ) : null}
+      <Hero title={shownHero} onOpen={onOpen} />
+      {shownRows.map((row) => (
         <Row key={row.id} row={row} onOpen={(title) => onOpen(title)} />
       ))}
     </div>

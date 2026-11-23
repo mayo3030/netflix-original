@@ -5,6 +5,7 @@ import { useMyList } from '../context/MyListProvider';
 import { useLanguage } from '../i18n/LanguageProvider';
 import { isAbort } from '../lib/abort';
 import { folderName } from '../storage/myList';
+import { netflixWatchUrl } from '../import/catalog';
 import { netflixTitleUrl } from '../import/netflix';
 import { displayText, genreChips, initials } from '../text';
 import type { Title } from '../types';
@@ -120,9 +121,10 @@ export function DetailModal({
               </ul>
             ) : null}
             {shown.netflixId ? (
-              <p className="fine-print">
-                <a href={netflixTitleUrl(shown.netflixId)} target="_blank" rel="noreferrer">{t('openOnNetflix')}</a>
-              </p>
+              <div className="hero-actions">
+                <a className="btn btn-primary" href={netflixWatchUrl(shown.netflixId)} target="_blank" rel="noreferrer">{t('play')}</a>
+                <a className="btn btn-ghost" href={netflixTitleUrl(shown.netflixId)} target="_blank" rel="noreferrer">{t('openOnNetflix')}</a>
+              </div>
             ) : null}
           </div>
         </div>
@@ -172,7 +174,7 @@ export function DetailModal({
                   return (
                     <li key={member.id} className="cast-card">
                       {member.profileUrl ? (
-                        <img src={member.profileUrl} alt="" />
+                        <img src={member.profileUrl} alt="" referrerPolicy="no-referrer" />
                       ) : (
                         <span className="avatar" style={{ '--h': (member.id * 47) % 360 } as CSSProperties}>{initials(person)}</span>
                       )}
@@ -184,6 +186,18 @@ export function DetailModal({
               </ul>
             ) : null}
           </section>
+          {shown.creators?.length ? (
+            <section aria-labelledby="detail-creators">
+              <h3 id="detail-creators">{t('creators')}</h3>
+              <p>{shown.creators.join(', ')}</p>
+            </section>
+          ) : null}
+          {shown.directors?.length ? (
+            <section aria-labelledby="detail-directors">
+              <h3 id="detail-directors">{t('directors')}</h3>
+              <p>{shown.directors.join(', ')}</p>
+            </section>
+          ) : null}
           </div>
 
           <section id="modal-trailer" aria-labelledby="detail-trailer">

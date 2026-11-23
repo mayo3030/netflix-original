@@ -43,6 +43,9 @@ export type Title = {
   openCinema: boolean;
   credit: Credit | null;
   netflixId: string | null;
+  maturity?: string | null;
+  creators?: string[];
+  directors?: string[];
 };
 
 export type CatalogRow = {

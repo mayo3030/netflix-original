@@ -196,6 +196,159 @@ describe('live settings/viewed markup', () => {
   });
 });
 
+const apiPayload = {
+  jsonGraph: {
+    videos: {
+      81486332: {
+        title: { $type: 'atom', value: 'Heartland' },
+        synopsis: { value: 'Amy heals horses and the people around them.' },
+        year: { value: 2007 },
+        runtime: { value: 2700 },
+        seasonCount: { value: 17 },
+        maturity: { rating: { value: 'TV-14' } },
+        boxarts: { _342x192: { jpg: { url: { value: 'https://occ-0-1.nflxso.net/boxart.jpg' } } } },
+        storyarts: { _1632x873: { jpg: { url: { value: 'https://occ-0-1.nflxso.net/story.jpg' } } } },
+        genres: { 0: { name: 'Drama' }, 1: { name: 'Family' } },
+        cast: { 0: { name: 'Amber Marshall' } },
+        creators: { 0: { name: 'Heather Conkie' } },
+        directors: { 0: { name: 'Dean Bennett' } },
+      },
+    },
+  },
+};
+
+const titlePage = `
+  <html><head>
+    <meta property="og:title" content="Heartland" />
+    <meta property="og:description" content="A short social description." />
+    <meta property="og:image" content="https://occ-0-1.nflxso.net/og-story.jpg" />
+    <meta property="og:type" content="video.tv_show" />
+    <script type="application/ld+json">
+      {
+        "@type": "TVSeries",
+        "name": "Heartland",
+        "description": "Amy heals horses and the people around them.",
+        "datePublished": "2007-10-14",
+        "contentRating": "TV-14",
+        "numberOfSeasons": 17,
+        "duration": "PT45M",
+        "genre": ["Drama", "Family"],
+        "actor": [{ "@type": "Person", "name": "Amber Marshall" }],
+        "creator": [{ "@type": "Person", "name": "Heather Conkie" }],
+        "director": [{ "@type": "Person", "name": "Dean Bennett" }],
+        "image": "https://dnm.nflximg.net/api/v6/boxart/heartland.jpg"
+      }
+    </script>
+  </head>
+  <body>
+    <img class="title-card boxart" src="https://dnm.nflximg.net/api/v6/boxart/fallback.jpg" alt="Heartland" />
+  </body></html>
+`;
+
+describe('title metadata parsers', () => {
+  it('reads a batched pathEvaluator payload', () => {
+    const dom = page('', 'https://www.netflix.com/settings/viewed');
+    const byId = dom.window.MinaflixScrape.metadataFromApiPayload(apiPayload);
+    expect(byId['81486332']).toMatchObject({
+      title: 'Heartland',
+      synopsis: 'Amy heals horses and the people around them.',
+      year: '2007',
+      maturity: 'TV-14',
+      runtimeMinutes: 45,
+      seasons: 17,
+      genres: ['Drama', 'Family'],
+      cast: ['Amber Marshall'],
+      creators: ['Heather Conkie'],
+      directors: ['Dean Bennett'],
+      mediaType: 'tv',
+      image: 'https://occ-0-1.nflxso.net/boxart.jpg',
+      backdrop: 'https://occ-0-1.nflxso.net/story.jpg',
+      source: 'api',
+    });
+    expect(JSON.stringify(byId)).not.toContain('authURL');
+  });
+
+  it('prefers JSON-LD and og:image on a title page', () => {
+    const dom = page('', 'https://www.netflix.com/title/81486332');
+    const meta = dom.window.MinaflixScrape.metadataFromTitleHtml(titlePage);
+    expect(meta).toMatchObject({
+      title: 'Heartland',
+      synopsis: 'Amy heals horses and the people around them.',
+      year: '2007',
+      maturity: 'TV-14',
+      seasons: 17,
+      runtimeMinutes: 45,
+      genres: ['Drama', 'Family'],
+      cast: ['Amber Marshall'],
+      creators: ['Heather Conkie'],
+      directors: ['Dean Bennett'],
+      mediaType: 'tv',
+      image: 'https://occ-0-1.nflxso.net/og-story.jpg',
+      source: 'page',
+    });
+  });
+
+  it('reads the member API locator without treating the auth token as title data', () => {
+    const dom = page('', 'https://www.netflix.com/browse');
+    const api = dom.window.MinaflixScrape.readMemberApi({
+      models: {
+        serverDefs: { data: { BUILD_IDENTIFIER: 'build42', API_ROOT: '/api/shakti' } },
+        userInfo: { data: { authURL: 'secret-token' } },
+      },
+    });
+    expect(api.buildId).toBe('build42');
+    expect(dom.window.MinaflixScrape.memberApiUrl(api)).toBe('https://www.netflix.com/api/shakti/build42/pathEvaluator');
+    const paths = JSON.stringify(dom.window.MinaflixScrape.metadataPaths(['81486332']));
+    expect(paths).not.toMatch(/license|manifest|playback|drm/i);
+  });
+});
+
+describe('catalog rows', () => {
+  it('reads lolomo rows and video references', () => {
+    const dom = page('', 'https://www.netflix.com/browse');
+    const rows = dom.window.MinaflixScrape.rowsFromLolomo({
+      jsonGraph: {
+        lolomo: {
+          0: {
+            displayName: { value: 'Trending Now' },
+            0: { reference: { value: ['videos', 81486332] }, summary: { value: { id: 81486332, title: 'Heartland' } } },
+            1: { reference: { value: ['videos', 81749470] } },
+          },
+          1: {
+            displayName: { value: 'Action' },
+            0: { summary: { value: { id: 81989718, title: 'The Body' } } },
+          },
+        },
+      },
+    });
+    expect(rows.map((row) => row.name)).toEqual(['Trending Now', 'Action']);
+    expect(rows[0].titles.map((item) => item.netflixId)).toEqual(['81486332', '81749470']);
+    expect(rows[0].titles[0].title).toBe('Heartland');
+  });
+
+  it('reads browse page rows and genre links without taking video', () => {
+    const dom = page('', 'https://www.netflix.com/browse');
+    const parsed = dom.window.MinaflixScrape.rowsFromBrowseHtml(`
+      <section class="lolomoRow">
+        <h2>Drama</h2>
+        <a href="/title/81486332">Heartland</a>
+        <a href="/watch/81749470">Guarding Stars</a>
+      </section>
+      <a href="/browse/genre/34399">Action</a>
+    `);
+    expect(parsed.rows[0].name).toBe('Drama');
+    expect(parsed.rows[0].titles.map((item) => item.netflixId)).toEqual(['81486332', '81749470']);
+    expect(parsed.genres).toEqual([{ id: '34399', name: 'Action' }]);
+  });
+
+  it('asks only for row names and title references', () => {
+    const dom = page('', 'https://www.netflix.com/browse');
+    const paths = JSON.stringify(dom.window.MinaflixScrape.catalogPaths(0, 5, 10));
+    expect(paths).toContain('lolomo');
+    expect(paths).not.toMatch(/license|manifest|playback|drm|video_tracks/i);
+  });
+});
+
 describe('activity urls', () => {
   it('accepts the current page and the old one', () => {
     const { isActivityUrl } = page('', 'https://www.netflix.com/').window.MinaflixScrape;

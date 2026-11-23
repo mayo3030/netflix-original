@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useLanguage } from '../i18n/LanguageProvider';
 import { useMyList } from '../context/MyListProvider';
 import { TMDB_LOOKUP_LIMIT, matchNetflixEntries } from '../import/match';
+import { mergeStoredCatalog, parseCatalogFile } from '../import/catalog';
 import { NetflixImportError, parseNetflixImport } from '../import/netflix';
 import type { Title } from '../types';
 
@@ -42,6 +43,23 @@ export function ImportView({ onDone }: { onDone: () => void }) {
     abortRef.current = controller;
     try {
       const text = await file.text();
+      if (text.includes('"kind"') && text.includes('catalog')) {
+        try {
+          const stored = mergeStoredCatalog(parseCatalogFile(text));
+          const count = stored.rows.reduce((sum, row) => sum + row.titles.length, 0);
+          setStatus('done');
+          setProgress('');
+          setMessage(`${t('yourCatalog')}: ${count}`);
+          window.location.hash = '#/';
+          return;
+        } catch (error) {
+          if (!(error instanceof NetflixImportError) || !/"kind"\s*:\s*"catalog"/.test(text)) throw error;
+          setStatus('error');
+          setProgress('');
+          setMessage(error.message);
+          return;
+        }
+      }
       const lists = parseNetflixImport(text, file.name);
       const listEntries = lists.myList;
       const activityEntries = lists.viewingActivity;

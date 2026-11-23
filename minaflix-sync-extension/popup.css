@@ -21,6 +21,7 @@ button {
   cursor: pointer;
 }
 button:disabled { opacity: 0.6; cursor: progress; }
+button.ghost { background: transparent; color: #f6f1e7; border: 1px solid rgba(246, 241, 231, 0.28); }
 .fine, #status { color: #c0b6aa; font-size: 12px; }
 #summary { color: #f6f1e7; font-size: 15px; font-weight: 700; white-space: pre-wrap; }
 #status { white-space: pre-wrap; max-height: 140px; overflow: auto; }

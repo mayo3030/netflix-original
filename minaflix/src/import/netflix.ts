@@ -3,6 +3,19 @@ export type NetflixEntry = {
   showTitle: string | null;
   netflixId: string | null;
   watchedAt: string | null;
+  synopsis?: string | null;
+  image?: string | null;
+  backdrop?: string | null;
+  maturity?: string | null;
+  genres?: string[];
+  cast?: string[];
+  creators?: string[];
+  directors?: string[];
+  year?: string | null;
+  runtimeMinutes?: number | null;
+  seasons?: number | null;
+  mediaType?: 'movie' | 'tv' | null;
+  detailSource?: 'api' | 'page' | null;
 };
 
 export type NetflixLists = {
@@ -153,19 +166,90 @@ export function parseViewingActivityCsv(text: string): NetflixEntry[] {
   return take(entries);
 }
 
+function httpsUrl(value: unknown): string | null {
+  return typeof value === 'string' && /^https:\/\/\S+$/i.test(value) ? value : null;
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    .map((item) => item.trim())
+    .slice(0, 20);
+}
+
+function detailsFromRecord(record: {
+  synopsis?: unknown;
+  image?: unknown;
+  backdrop?: unknown;
+  maturity?: unknown;
+  genres?: unknown;
+  cast?: unknown;
+  creators?: unknown;
+  directors?: unknown;
+  year?: unknown;
+  runtimeMinutes?: unknown;
+  seasons?: unknown;
+  mediaType?: unknown;
+  source?: unknown;
+  detailSource?: unknown;
+}): Partial<NetflixEntry> {
+  const details: Partial<NetflixEntry> = {};
+  if (typeof record.synopsis === 'string' && record.synopsis.trim()) details.synopsis = record.synopsis.trim();
+  const image = httpsUrl(record.image);
+  const backdrop = httpsUrl(record.backdrop);
+  if (image) details.image = image;
+  if (backdrop) details.backdrop = backdrop;
+  if (typeof record.maturity === 'string' && record.maturity.trim()) details.maturity = record.maturity.trim();
+  const genres = stringList(record.genres);
+  const cast = stringList(record.cast);
+  const creators = stringList(record.creators);
+  const directors = stringList(record.directors);
+  if (genres.length) details.genres = genres;
+  if (cast.length) details.cast = cast;
+  if (creators.length) details.creators = creators;
+  if (directors.length) details.directors = directors;
+  if (typeof record.year === 'string' && /^\d{4}$/.test(record.year)) details.year = record.year;
+  if (typeof record.runtimeMinutes === 'number') details.runtimeMinutes = record.runtimeMinutes;
+  if (typeof record.seasons === 'number') details.seasons = record.seasons;
+  if (record.mediaType === 'movie' || record.mediaType === 'tv') details.mediaType = record.mediaType;
+  const source = record.detailSource || record.source;
+  if (source === 'api' || source === 'page') details.detailSource = source;
+  return details;
+}
+
 function readJsonEntries(value: unknown, requireId: boolean): NetflixEntry[] {
   if (!Array.isArray(value)) throw new NetflixImportError('The export lists are not arrays.');
   const entries: NetflixEntry[] = [];
   for (const item of value) {
     if (!item || typeof item !== 'object') continue;
-    const record = item as { title?: unknown; showTitle?: unknown; netflixId?: unknown; watchedAt?: unknown };
+    const record = item as {
+      title?: unknown;
+      showTitle?: unknown;
+      netflixId?: unknown;
+      watchedAt?: unknown;
+      synopsis?: unknown;
+      image?: unknown;
+      backdrop?: unknown;
+      maturity?: unknown;
+      genres?: unknown;
+      cast?: unknown;
+      creators?: unknown;
+      directors?: unknown;
+      year?: unknown;
+      runtimeMinutes?: unknown;
+      seasons?: unknown;
+      mediaType?: unknown;
+      source?: unknown;
+      detailSource?: unknown;
+    };
     if (typeof record.title !== 'string') continue;
     const id = typeof record.netflixId === 'string' ? record.netflixId : null;
     if (requireId && !id) continue;
     const watched = typeof record.watchedAt === 'string' ? record.watchedAt : null;
     const showTitle = typeof record.showTitle === 'string' ? record.showTitle : null;
     const next = entry(record.title, id, watched, showTitle);
-    if (next) entries.push(next);
+    if (next) entries.push({ ...next, ...detailsFromRecord(record) });
   }
   return take(entries);
 }

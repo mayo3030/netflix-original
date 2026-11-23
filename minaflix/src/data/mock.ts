@@ -765,8 +765,31 @@ export function searchMock(query: string): Title[] {
 }
 
 export function titleFromSaved(saved: SavedItem): Title {
+  const restored = {
+    genreNames: saved.genreNames ?? [],
+    runtime: saved.runtime ?? null,
+    seasons: saved.seasons ?? null,
+    cast: saved.cast ?? [],
+    maturity: saved.maturity ?? null,
+    creators: saved.creators ?? [],
+    directors: saved.directors ?? [],
+  };
   const mock = getMockTitle(saved.id);
-  if (mock) return { ...mock, netflixId: saved.netflixId };
+  if (mock) {
+    return {
+      ...mock,
+      netflixId: saved.netflixId,
+      posterUrl: saved.posterUrl || mock.posterUrl,
+      backdropUrl: saved.backdropUrl || mock.backdropUrl,
+      overview: saved.overview || mock.overview,
+      year: saved.year || mock.year,
+      ...restored,
+      genreNames: restored.genreNames.length ? restored.genreNames : mock.genreNames,
+      cast: restored.cast.length ? restored.cast : mock.cast,
+      runtime: restored.runtime ?? mock.runtime,
+      seasons: restored.seasons ?? mock.seasons,
+    };
+  }
   return {
     id: saved.id,
     source: saved.id.startsWith('tmdb-') ? 'tmdb' : 'mock',
@@ -780,17 +803,14 @@ export function titleFromSaved(saved: SavedItem): Title {
     rating: saved.rating,
     year: saved.year,
     genreIds: saved.genreIds,
-    genreNames: [],
     hue: saved.hue,
     pattern: saved.pattern,
     trailerKey: saved.trailerKey,
-    runtime: null,
-    seasons: null,
-    cast: [],
     detailsLoaded: saved.id.startsWith('netflix-'),
     detailsError: false,
     openCinema: false,
     credit: null,
     netflixId: saved.netflixId,
+    ...restored,
   };
 }

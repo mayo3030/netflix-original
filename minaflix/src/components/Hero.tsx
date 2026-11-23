@@ -2,6 +2,7 @@ import { useCatalog } from '../context/CatalogProvider';
 import { useLanguage } from '../i18n/LanguageProvider';
 import { displayText, genreChips } from '../text';
 import type { Title } from '../types';
+import { netflixWatchUrl } from '../import/catalog';
 import { MetaBits } from './MetaBits';
 import { Backdrop } from './Poster';
 
@@ -37,12 +38,14 @@ export function Hero({
         ) : null}
         <p className="hero-overview">{overview}</p>
         <div className="hero-actions">
-          {title.trailerKey ? (
+          {title.netflixId ? (
+            <a className="btn btn-primary" href={netflixWatchUrl(title.netflixId)} target="_blank" rel="noreferrer">{t('play')}</a>
+          ) : title.trailerKey ? (
             <button type="button" className="btn btn-primary" onClick={() => onOpen(title, { trailer: true })}>
               {t('playTrailer')}
             </button>
           ) : null}
-          <button type="button" className={title.trailerKey ? 'btn btn-ghost' : 'btn btn-primary'} onClick={() => onOpen(title)}>
+          <button type="button" className={title.netflixId || title.trailerKey ? 'btn btn-ghost' : 'btn btn-primary'} onClick={() => onOpen(title)}>
             {t('details')}
           </button>
         </div>

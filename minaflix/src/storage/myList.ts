@@ -1,4 +1,4 @@
-import type { Language, MediaType, Pattern, Title } from '../types';
+import type { CastMember, Language, MediaType, Pattern, Title } from '../types';
 
 const STORAGE_KEY = 'minaflix.mylist.v1';
 const PATTERNS: Pattern[] = ['arch', 'orbit', 'dune', 'kiln'];
@@ -19,6 +19,13 @@ export type SavedItem = {
   pattern: Pattern;
   trailerKey: string | null;
   netflixId: string | null;
+  runtime?: number | null;
+  seasons?: number | null;
+  genreNames?: string[];
+  cast?: CastMember[];
+  maturity?: string | null;
+  creators?: string[];
+  directors?: string[];
 };
 
 export type Folder = {
@@ -68,6 +75,13 @@ export function toSaved(title: Title): SavedItem {
     pattern: title.pattern,
     trailerKey: title.trailerKey,
     netflixId: title.netflixId,
+    runtime: title.runtime,
+    seasons: title.seasons,
+    genreNames: title.genreNames,
+    cast: title.cast,
+    maturity: title.maturity ?? null,
+    creators: title.creators ?? [],
+    directors: title.directors ?? [],
   };
 }
 

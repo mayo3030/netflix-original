@@ -5,6 +5,7 @@ import type { Title } from '../types';
 export function MetaBits({ title }: { title: Title }) {
   const { language, t } = useLanguage();
   const parts: string[] = [];
+  if (title.maturity) parts.push(title.maturity);
   if (title.year) parts.push(title.year);
   if (title.rating) parts.push(formatRating(title.rating));
   if (title.mediaType === 'tv' && title.seasons) parts.push(seasonsLabel(title.seasons, language));

@@ -67,6 +67,35 @@ describe('parseMinaflixExport', () => {
     }));
     expect(lists.myList).toEqual([{ title: 'Sintel', showTitle: null, netflixId: '80000001', watchedAt: null }]);
     expect(lists.viewingActivity?.[0]?.watchedAt).toBe('2024-11-02');
+    const rich = parseMinaflixExport(JSON.stringify({
+      version: 1,
+      source: 'netflix-dom',
+      myList: [],
+      viewingActivity: [{
+        title: 'Heartland',
+        netflixId: '81486332',
+        watchedAt: '2026-11-19',
+        synopsis: 'Amy heals horses and the people around them.',
+        image: 'https://occ-0-1.nflxso.net/boxart.jpg',
+        backdrop: 'https://occ-0-1.nflxso.net/story.jpg',
+        maturity: 'TV-14',
+        genres: ['Drama'],
+        cast: ['Amber Marshall'],
+        creators: ['Heather Conkie'],
+        seasons: 17,
+        mediaType: 'tv',
+        source: 'api',
+      }],
+    }));
+    expect(rich.viewingActivity?.[0]).toMatchObject({
+      synopsis: 'Amy heals horses and the people around them.',
+      image: 'https://occ-0-1.nflxso.net/boxart.jpg',
+      backdrop: 'https://occ-0-1.nflxso.net/story.jpg',
+      maturity: 'TV-14',
+      cast: ['Amber Marshall'],
+      detailSource: 'api',
+      mediaType: 'tv',
+    });
   });
 
   it('rejects a different JSON shape', () => {
