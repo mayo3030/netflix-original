@@ -150,6 +150,23 @@ main { padding-bottom: calc(92px + var(--safe-b)); }
 }
 .backdrop, .backdrop .art, .backdrop > img { position: absolute; inset: 0; width: 100%; height: 100%; }
 .backdrop > img { object-fit: cover; }
+.hero-preview {
+  position: absolute;
+  inset: -12%;
+  width: 124%;
+  height: 124%;
+  border: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+.hero-shade { z-index: 1; }
+.hero-copy { position: relative; z-index: 2; }
+.trailer-close {
+  position: absolute;
+  z-index: 1;
+  top: 8px;
+  inset-inline-end: 8px;
+}
 .hero-shade, .modal-hero::after {
   content: "";
   position: absolute;

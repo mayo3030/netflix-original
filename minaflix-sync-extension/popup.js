@@ -1,6 +1,7 @@
 const button = document.getElementById('export');
 const catalog = document.getElementById('catalog');
 const cap = document.getElementById('cap');
+const trailers = document.getElementById('trailers');
 const status = document.getElementById('status');
 const summary = document.getElementById('summary');
 const lines = [];
@@ -20,6 +21,7 @@ function setBusy(busy) {
   button.disabled = busy;
   catalog.disabled = busy;
   if (cap) cap.disabled = busy;
+  if (trailers) trailers.disabled = busy;
 }
 
 const port = chrome.runtime.connect({ name: 'minaflix-export' });
@@ -51,7 +53,8 @@ function startExport(mode) {
   summary.textContent = '';
   pushStatus(mode === 'catalog' ? 'Starting catalog sync… It keeps running if this popup closes.' : 'Starting…');
   const detailCap = mode === 'catalog' && cap && cap.value.trim() !== '' ? Number(cap.value) : null;
-  port.postMessage({ type: 'start', mode, detailCap });
+  const lookupTrailers = mode === 'catalog' && Boolean(trailers?.checked);
+  port.postMessage({ type: 'start', mode, detailCap, lookupTrailers });
 }
 
 button.addEventListener('click', () => startExport('lists'));

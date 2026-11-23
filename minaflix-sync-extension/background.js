@@ -1,3 +1,9 @@
+try {
+  importScripts('youtube.js');
+} catch {
+  // The YouTube parser is also loaded directly by unit tests.
+}
+
 const MY_LIST_URL = 'https://www.netflix.com/browse/my-list';
 const ACTIVITY_URL = 'https://www.netflix.com/viewingactivity';
 const ACTIVITY_PATHS = ['/viewingactivity', '/settings/viewed', '/moviesyouveseen'];
@@ -401,7 +407,7 @@ function cardTitleFor(job, id) {
   return '';
 }
 
-function catalogTitle(item, meta) {
+function catalogTitle(item, meta, trailer) {
   return {
     title: cardTitleOverDetail(item.title, meta?.title) || `Title ${item.netflixId}`,
     showTitle: null,
@@ -420,7 +426,52 @@ function catalogTitle(item, meta) {
     image: item.image || meta?.image || null,
     backdrop: meta?.backdrop || null,
     source: meta?.source || null,
+    trailerYoutubeId: trailer?.trailerYoutubeId || null,
+    trailerTitle: trailer?.trailerTitle || null,
+    trailerChannel: trailer?.trailerChannel || null,
   };
+}
+
+async function applyTrailers(job, send) {
+  if (!job.lookupTrailers || !globalThis.MinaflixYoutube) return 0;
+  const titles = new Map();
+  for (const row of job.rows || []) {
+    for (const item of row.titles || []) {
+      if (!item?.netflixId || titles.has(item.netflixId)) continue;
+      const meta = job.details?.[item.netflixId];
+      titles.set(item.netflixId, {
+        title: cardTitleOverDetail(item.title, meta?.title) || item.title,
+        year: meta?.year || '',
+      });
+    }
+  }
+  const pending = [...titles.keys()].filter((id) => !Object.prototype.hasOwnProperty.call(job.trailers, id));
+  let found = Object.values(job.trailers).filter((item) => item?.trailerYoutubeId).length;
+  let reportedEmpty = false;
+  for (const id of pending) {
+    const info = titles.get(id);
+    send({ type: 'progress', text: `Trailers ${found}. Looking up ${info.title}…` });
+    try {
+      const response = await fetch(globalThis.MinaflixYoutube.youtubeSearchUrl(info.title, info.year), {
+        credentials: 'omit',
+        headers: { accept: 'text/html' },
+      });
+      const html = response.ok ? await response.text() : '';
+      const trailer = html ? globalThis.MinaflixYoutube.pickTrailer(html, info.title) : null;
+      job.trailers[id] = trailer || { trailerYoutubeId: null, trailerTitle: null, trailerChannel: null };
+      if (!html.includes('ytInitialData') && !reportedEmpty) {
+        reportedEmpty = true;
+        job.errors.push({ section: 'trailers', message: `YouTube returned no search data for ${info.title} (HTTP ${response.status}).` });
+      }
+      if (trailer?.trailerYoutubeId) found += 1;
+    } catch (error) {
+      job.trailers[id] = { trailerYoutubeId: null, trailerTitle: null, trailerChannel: null };
+      job.errors.push({ section: 'trailers', id, message: error instanceof Error ? error.message : 'YouTube lookup failed' });
+    }
+    await writeCatalogJob(job);
+    await sleep(400);
+  }
+  return found;
 }
 
 async function downloadCatalog(rows, summary, errors) {
@@ -484,6 +535,8 @@ function prepareJob(job, message) {
   job.detailAttempts = job.detailAttempts || 0;
   if (message && Object.prototype.hasOwnProperty.call(message, 'detailCap')) job.detailCap = parseCap(message.detailCap);
   else if (!Object.prototype.hasOwnProperty.call(job, 'detailCap')) job.detailCap = null;
+  if (message && Object.prototype.hasOwnProperty.call(message, 'lookupTrailers')) job.lookupTrailers = Boolean(message.lookupTrailers);
+  job.trailers = job.trailers && typeof job.trailers === 'object' ? job.trailers : {};
   job.graphqlStopped = Boolean(job.graphqlStopped);
   if (job.detailVersion !== 3) {
     const redo = Object.keys(job.details).filter((id) => !detailComplete(job.details[id]));
@@ -737,15 +790,17 @@ async function syncCatalog(message) {
       send({ type: 'progress', text: 'Detail limit 0. Saving card images without more lookups.' });
     }
     await writeCatalogJob(job);
+    const trailerCount = await applyTrailers(job, send);
     const rows = job.rows.map((row) => ({
       name: row.name,
-      titles: row.titles.map((item) => catalogTitle(item, job.details[item.netflixId])),
+      titles: row.titles.map((item) => catalogTitle(item, job.details[item.netflixId], job.trailers?.[item.netflixId])),
     })).filter((row) => row.titles.length);
     const count = rows.reduce((sum, row) => sum + row.titles.length, 0);
     const images = rows.reduce((sum, row) => sum + row.titles.filter((item) => item.image).length, 0);
     const detailed = Object.keys(job.details).length;
     const failure = detailed === 0 ? (job.errors || []).find((item) => item.message) : null;
-    const summary = `Exported ${count} catalog titles in ${rows.length} rows. Images ${images}. Details ${detailed} (${pathSummary(job)}).${failure ? ` ${failure.message}` : ''}`;
+    const trailerNote = job.lookupTrailers ? ` Trailers ${trailerCount}.` : '';
+    const summary = `Exported ${count} catalog titles in ${rows.length} rows. Images ${images}. Details ${detailed} (${pathSummary(job)}).${trailerNote}${failure ? ` ${failure.message}` : ''}`;
     send({ type: 'summary', text: summary });
     await sleep(400);
     await downloadCatalog(rows, summary, job.errors || []);

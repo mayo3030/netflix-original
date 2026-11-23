@@ -40,7 +40,19 @@ function entryFrom(value: unknown): CatalogTitle | null {
     detailSource: record.source === 'api' || record.source === 'page' || record.source === 'cache' || record.source === 'graphql' || record.source === 'modal'
       ? record.source
       : record.detailSource ?? null,
+    trailerYoutubeId: youtubeId(record.trailerYoutubeId),
+    trailerTitle: typeof record.trailerTitle === 'string' ? record.trailerTitle : null,
+    trailerChannel: typeof record.trailerChannel === 'string' ? record.trailerChannel : null,
   };
+}
+
+function youtubeId(value: unknown): string | null {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{11}$/.test(value) ? value : null;
+}
+
+export function youtubeTrailerSearchUrl(title: string, year: string): string {
+  const query = [title, year, 'official trailer Netflix'].filter((part) => part.trim()).join(' ');
+  return `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
 }
 
 export function parseCatalogFile(text: string): StoredCatalog {
@@ -89,12 +101,30 @@ function preferCardTitles(rows: StoredCatalog['rows']): StoredCatalog['rows'] {
       if (!current || rank > current.rank) best.set(title.netflixId, { title: cleanedTitle(title.title), rank });
     }
   }
+  const trailers = new Map<string, Pick<CatalogTitle, 'trailerYoutubeId' | 'trailerTitle' | 'trailerChannel'>>();
+  for (const row of rows) {
+    for (const title of row.titles) {
+      if (!title.netflixId || !title.trailerYoutubeId || trailers.has(title.netflixId)) continue;
+      trailers.set(title.netflixId, {
+        trailerYoutubeId: title.trailerYoutubeId,
+        trailerTitle: title.trailerTitle ?? null,
+        trailerChannel: title.trailerChannel ?? null,
+      });
+    }
+  }
   return rows.map((row) => ({
     ...row,
     titles: row.titles.map((title) => {
       const preferred = title.netflixId ? best.get(title.netflixId) : null;
-      if (!preferred || preferred.rank === 0) return { ...title, title: cleanedTitle(title.title) };
-      return { ...title, title: preferred.title };
+      const trailer = title.netflixId ? trailers.get(title.netflixId) : null;
+      const next = {
+        ...title,
+        title: preferred && preferred.rank > 0 ? preferred.title : cleanedTitle(title.title),
+        trailerYoutubeId: title.trailerYoutubeId || trailer?.trailerYoutubeId || null,
+        trailerTitle: title.trailerTitle || trailer?.trailerTitle || null,
+        trailerChannel: title.trailerChannel || trailer?.trailerChannel || null,
+      };
+      return next;
     }),
   }));
 }
@@ -117,7 +147,7 @@ export function titleFromCatalog(entry: CatalogTitle): Title {
     genreNames: entry.genres ?? [],
     hue: hueFromId(id),
     pattern: patternFromId(id),
-    trailerKey: null,
+    trailerKey: entry.trailerYoutubeId || null,
     runtime: entry.runtimeMinutes ?? null,
     seasons: entry.seasons ?? null,
     cast: (entry.cast ?? []).map((name, index) => ({

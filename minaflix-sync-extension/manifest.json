@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "MinaFlix Sync",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "Read your own Netflix My List and viewing activity into a local JSON file for MinaFlix. Does not read your password, cookies, or video.",
   "permissions": ["scripting", "tabs", "downloads", "storage", "alarms"],
-  "host_permissions": ["https://www.netflix.com/*", "https://netflix.com/*"],
+  "host_permissions": ["https://www.netflix.com/*", "https://netflix.com/*", "https://www.youtube.com/*"],
   "background": {
     "service_worker": "background.js"
   },

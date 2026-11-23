@@ -5,7 +5,7 @@ import { useMyList } from '../context/MyListProvider';
 import { useLanguage } from '../i18n/LanguageProvider';
 import { isAbort } from '../lib/abort';
 import { folderName } from '../storage/myList';
-import { netflixWatchUrl } from '../import/catalog';
+import { netflixWatchUrl, youtubeTrailerSearchUrl } from '../import/catalog';
 import { netflixTitleUrl } from '../import/netflix';
 import { displayText, genreChips, initials } from '../text';
 import type { Title } from '../types';
@@ -120,12 +120,19 @@ export function DetailModal({
                 {chips.map((chip) => <li key={chip}>{chip}</li>)}
               </ul>
             ) : null}
-            {shown.netflixId ? (
-              <div className="hero-actions">
+            <div className="hero-actions">
+              {shown.netflixId ? (
                 <a className="btn btn-primary" href={netflixWatchUrl(shown.netflixId)} target="_blank" rel="noreferrer">{t('play')}</a>
+              ) : null}
+              {shown.trailerKey ? (
+                <button type="button" className="btn btn-ghost" onClick={() => setPlaying(true)}>{t('watchTrailer')}</button>
+              ) : (
+                <a className="btn btn-ghost" href={youtubeTrailerSearchUrl(name, shown.year)} target="_blank" rel="noreferrer">{t('watchTrailer')}</a>
+              )}
+              {shown.netflixId ? (
                 <a className="btn btn-ghost" href={netflixTitleUrl(shown.netflixId)} target="_blank" rel="noreferrer">{t('openOnNetflix')}</a>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
           </div>
         </div>
         <div className="modal-body modal-grid">
@@ -205,6 +212,7 @@ export function DetailModal({
             {pending ? <p>{t('loadingDetails')}</p> : null}
             {!pending && shown.trailerKey && playing ? (
               <div className="trailer-frame">
+                <button type="button" className="trailer-close" onClick={() => setPlaying(false)}>{t('close')}</button>
                 <iframe
                   src={`https://www.youtube-nocookie.com/embed/${shown.trailerKey}?rel=0&autoplay=1`}
                   title={`${t('trailer')}: ${name}`}

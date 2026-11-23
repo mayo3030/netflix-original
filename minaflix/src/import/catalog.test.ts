@@ -33,6 +33,31 @@ describe('parseCatalogFile', () => {
     expect(title.seasons).toBe(17);
     expect(title.cast[0]?.name).toBe('Amber Marshall');
     expect(title.netflixId).toBe('81486332');
+    expect(title.trailerKey).toBeNull();
+  });
+
+  it('uses an official YouTube trailer id from the catalog export', () => {
+    const catalog = parseCatalogFile(JSON.stringify({
+      kind: 'catalog',
+      rows: [{
+        name: 'Drama',
+        titles: [{
+          title: 'Episodes',
+          netflixId: '81486332',
+        }, {
+          title: 'Heartland',
+          netflixId: '81486332',
+          year: '2007',
+          trailerYoutubeId: 'abcdefghijk',
+          trailerTitle: 'Heartland | Official Trailer',
+          trailerChannel: 'Netflix',
+        }],
+      }],
+    }));
+    const titles = catalog.rows[0]?.titles ?? [];
+    expect(titles.every((title) => title.title === 'Heartland')).toBe(true);
+    expect(titles.every((title) => title.trailerYoutubeId === 'abcdefghijk')).toBe(true);
+    expect(titleFromCatalog(titles[0]!).trailerKey).toBe('abcdefghijk');
   });
 
   it('features an imported Netflix title on the hero', () => {

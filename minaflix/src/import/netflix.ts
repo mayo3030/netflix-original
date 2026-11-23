@@ -16,6 +16,9 @@ export type NetflixEntry = {
   seasons?: number | null;
   mediaType?: 'movie' | 'tv' | null;
   detailSource?: 'api' | 'page' | 'cache' | 'graphql' | 'modal' | null;
+  trailerYoutubeId?: string | null;
+  trailerTitle?: string | null;
+  trailerChannel?: string | null;
 };
 
 export type NetflixLists = {
